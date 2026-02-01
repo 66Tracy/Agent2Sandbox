@@ -1,0 +1,21 @@
+[project]
+name = "agent2sandbox"
+version = "0.1.0"
+description = "A lightweight framework for Agent and OpenSandbox interaction"
+requires-python = ">=3.10"
+dependencies = [
+    "opensandbox>=0.1.0",
+    "opensandbox-code-interpreter>=0.1.0",
+    "pydantic>=2.0.0",
+    "openai>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
