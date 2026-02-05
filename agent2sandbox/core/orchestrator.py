@@ -173,6 +173,7 @@ class AgentOrchestrator:
         user_message: str,
         max_steps: int = 10,
         completion_check: Optional[Callable[[LLMResponse], bool]] = None,
+        on_step: Optional[Callable[[int, LLMResponse], None]] = None,
     ) -> LLMResponse:
         """
         Run the full task loop until completion or max steps reached.
@@ -181,6 +182,8 @@ class AgentOrchestrator:
             user_message: The initial user message
             max_steps: Maximum number of steps to execute
             completion_check: Optional function to check if task is complete
+            on_step: Optional callback called after each step.
+                       Receives (step_number, response).
 
         Returns:
             LLMResponse: The final response from the LLM
@@ -188,8 +191,12 @@ class AgentOrchestrator:
         current_message = user_message
         response = None
 
-        for _ in range(max_steps):
+        for step in range(max_steps):
             response = await self.step(current_message)
+
+            # Call step callback if provided
+            if on_step:
+                on_step(step + 1, response)
 
             # Check if task is complete
             if completion_check and completion_check(response):

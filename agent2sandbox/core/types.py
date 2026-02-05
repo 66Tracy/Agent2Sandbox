@@ -45,7 +45,7 @@ class ToolResult:
 @dataclass
 class SandboxConfig:
     """Configuration for sandbox creation."""
-    image: str = "python:3.12-slim"
+    image: str = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1"
     entrypoint: Optional[List[str]] = None
     env: Optional[Dict[str, str]] = None
     timeout: timedelta = timedelta(minutes=10)

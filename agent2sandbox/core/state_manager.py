@@ -80,6 +80,11 @@ class StateManager:
         """Get the current step count."""
         return self.state.current_step
 
+    @property
+    def sandbox_id(self) -> Optional[str]:
+        """Get the sandbox ID."""
+        return self.state.sandbox_id
+
     def reset_step_count(self):
         """Reset the step count to zero."""
         self.state.current_step = 0

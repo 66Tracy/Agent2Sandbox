@@ -33,7 +33,7 @@ class OpenAIClient(LLMClient):
         temperature: float = 0.7,
         **kwargs,
     ):
-        """Initialize the OpenAI client.
+        """Initialize OpenAI client.
 
         Args:
             api_key: OpenAI API key. If None, will use OPENAI_API_KEY env var.
@@ -47,6 +47,24 @@ class OpenAIClient(LLMClient):
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_config(cls, config, **kwargs):
+        """Create OpenAI client from Config object.
+
+        Args:
+            config: Config object with LLM settings.
+            **kwargs: Additional arguments to pass to AsyncOpenAI.
+
+        Returns:
+            OpenAIClient instance.
+        """
+        return cls(
+            api_key=config.api_key,
+            base_url=config.base_url,
+            model=config.model_name,
             **kwargs,
         )
 

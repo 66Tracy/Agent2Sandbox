@@ -45,7 +45,7 @@ async def test_basic_sandbox_interaction():
 
     # Create sandbox with code interpreter
     async with await Sandbox.create(
-        "python:3.12-slim",
+        "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
         timeout=timedelta(minutes=5),
     ) as sandbox:
@@ -94,7 +94,7 @@ async def test_agent2sandbox_tool_execution():
 
     # Create orchestrator with sandbox config
     config = SandboxConfig(
-        image="python:3.12-slim",
+        image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
     )
 
@@ -186,7 +186,7 @@ async def test_agent2sandbox_multi_round():
 
     # Create orchestrator
     config = SandboxConfig(
-        image="python:3.12-slim",
+        image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
     )
 
@@ -260,7 +260,7 @@ async def test_agent2sandbox_with_custom_handler():
 
     # Create orchestrator
     config = SandboxConfig(
-        image="python:3.12-slim",
+        image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
     )
 
