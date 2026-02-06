@@ -19,7 +19,7 @@
 **配置内容（.env）：**
 ```env
 BASE_URL=https://api.deepseek.com
-API_KEY=sk-46ee21aa82254279be5c52d2a6554b24
+API_KEY=YOUR_API_KEY_HERE
 MODEL_NAME=deepseek-chat
 ```
 

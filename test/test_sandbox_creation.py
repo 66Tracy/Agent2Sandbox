@@ -5,14 +5,14 @@ Simple test to verify sandbox can be created with the configured image.
 """
 
 import asyncio
-import sys
+import sys, os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from opensandbox import Sandbox
 from datetime import timedelta
-
+from opensandbox.config import ConnectionConfig
 
 async def test_sandbox_creation():
     """Test simple sandbox creation."""
@@ -21,11 +21,24 @@ async def test_sandbox_creation():
     try:
         # Try creating sandbox with code-interpreter image
         print("\n[1] Creating sandbox with code-interpreter image...")
-        sandbox = await Sandbox.create(
+        domain = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
+        api_key = os.getenv("SANDBOX_API_KEY")
+        image = os.getenv(
+            "SANDBOX_IMAGE",
             "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
-            entrypoint=["/opt/opensandbox/code-interpreter.sh"],
-            timeout=timedelta(minutes=5),
         )
+
+        config = ConnectionConfig(
+            domain=domain,
+            api_key=api_key,
+            request_timeout=timedelta(seconds=60),
+        )
+
+        sandbox = await Sandbox.create(
+            image,
+            connection_config=config,
+            entrypoint=["/opt/opensandbox/code-interpreter.sh"]
+        )   
 
         async with sandbox:
             print(f"[2] Sandbox created successfully: {sandbox.id}")
