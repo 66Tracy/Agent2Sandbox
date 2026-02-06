@@ -3,15 +3,19 @@ Agent Orchestrator - Coordinates interaction between Agent, tools, and sandbox.
 """
 
 import asyncio
+import os
 from typing import Optional, Callable, Awaitable, List, Any
+from datetime import timedelta
 
 from opensandbox import Sandbox
+from opensandbox.config import ConnectionConfig
 from code_interpreter import CodeInterpreter
 
 from agent2sandbox.core.types import (
     SandboxConfig,
     ToolCall,
     ToolResult,
+    ToolStatus,
     LLMMessage,
     LLMResponse,
 )
@@ -34,15 +38,28 @@ class AgentOrchestrator:
         self.state_manager = StateManager(config)
         self.tool_adapter: Optional[ToolAdapter] = None
         self.result_converter = ResultConverter()
+        self.conversation_history: List[LLMMessage] = []
 
     async def initialize(self) -> None:
-        """Initialize the orchestrator by creating the sandbox."""
-        # Create sandbox
+        """Initialize the orchestrator by creating of sandbox."""
+        # Get connection config from environment or sandbox config
+        domain = self.config.domain or os.getenv("SANDBOX_DOMAIN", "localhost:8080")
+        api_key = self.config.api_key or os.getenv("SANDBOX_API_KEY")
+
+        # Create connection config
+        connection_config = ConnectionConfig(
+            domain=domain,
+            api_key=api_key,
+            request_timeout=timedelta(seconds=60),
+        )
+
+        # Create sandbox with connection config
         sandbox = await Sandbox.create(
             self.config.image,
-            entrypoint=self.config.entrypoint,
+            connection_config=connection_config,
+            entrypoint=self.config.entrypoint
+            or ["/opt/opensandbox/code-interpreter.sh"],
             env=self.config.env,
-            timeout=self.config.timeout,
         )
 
         self.state_manager.sandbox = sandbox
@@ -61,13 +78,16 @@ class AgentOrchestrator:
             self.state_manager.code_interpreter,
         )
 
+        # Initialize conversation history
+        self.conversation_history = []
+
         self.state_manager.mark_initialized()
 
     async def execute_tool(self, tool_call: ToolCall) -> ToolResult:
         """Execute a tool call."""
         if self.tool_adapter is None:
             return ToolResult(
-                status="error",
+                status=ToolStatus.ERROR,
                 error="Tool adapter not initialized",
             )
 
@@ -87,7 +107,9 @@ class AgentOrchestrator:
     async def step(
         self,
         user_message: str,
-        tool_call_handler: Optional[Callable[[List[ToolCall]], Awaitable[List[ToolResult]]]] = None,
+        tool_call_handler: Optional[
+            Callable[[List[ToolCall]], Awaitable[List[ToolResult]]]
+        ] = None,
     ) -> LLMResponse:
         """
         Execute a single step of the agent interaction.
@@ -101,36 +123,63 @@ class AgentOrchestrator:
         Returns:
             LLMResponse: The response from the LLM
         """
+        if self.llm_client is None:
+            raise ValueError("LLM client is required for autonomous execution")
+
+        # Add user message to history
+        self.conversation_history.append(LLMMessage(role="user", content=user_message))
+
+        # Get response from LLM
+        response = await self.llm_client.chat(
+            messages=self.conversation_history,
+            tools=get_tool_definitions(),
+        )
+
         if tool_call_handler:
             # Use the provided handler for tool execution
-            response = await self.llm_client.chat(
-                messages=[LLMMessage(role="user", content=user_message)],
-                tools=get_tool_definitions(),
-            )
-
             if response.tool_calls:
                 results = await tool_call_handler(response.tool_calls)
                 # Continue the conversation with tool results
-                response = await self._continue_conversation(response.tool_calls, results)
-
-            return response
+                response = await self._continue_conversation(
+                    response.tool_calls, results
+                )
         else:
-            # Internal tool execution (requires LLM client)
-            if self.llm_client is None:
-                raise ValueError("LLM client is required for autonomous execution")
-
-            response = await self.llm_client.chat(
-                messages=[LLMMessage(role="user", content=user_message)],
-                tools=get_tool_definitions(),
-            )
-
+            # Internal tool execution
             # Execute tools if requested
             if response.tool_calls:
                 results = await self.execute_tools(response.tool_calls)
                 # Continue the conversation with tool results
-                response = await self._continue_conversation(response.tool_calls, results)
+                response = await self._continue_conversation(
+                    response.tool_calls, results
+                )
+            else:
+                # Add final response to history
+                self._add_response_to_history(response)
 
-            return response
+        return response
+
+    def _add_response_to_history(self, response: LLMResponse) -> None:
+        """Add assistant response to conversation history."""
+        if not response:
+            return
+
+        if response.tool_calls:
+            # Add assistant message with tool calls
+            self.conversation_history.append(
+                LLMMessage(
+                    role="assistant",
+                    content=response.content or "",
+                    tool_calls=response.tool_calls,
+                )
+            )
+        elif response.content:
+            # Add assistant message with content
+            self.conversation_history.append(
+                LLMMessage(
+                    role="assistant",
+                    content=response.content,
+                )
+            )
 
     async def _continue_conversation(
         self,
@@ -138,19 +187,19 @@ class AgentOrchestrator:
         results: List[ToolResult],
     ) -> LLMResponse:
         """Continue the conversation with tool results."""
-        messages: List[LLMMessage] = []
 
-        # Add assistant message with tool calls
-        messages.append(
+        # Add assistant message with tool calls to history
+        self.conversation_history.append(
             LLMMessage(
                 role="assistant",
+                content="",  # Empty content for tool calls message
                 tool_calls=tool_calls,
             )
         )
 
-        # Add tool results
+        # Add tool results to history
         for tool_call, result in zip(tool_calls, results):
-            messages.append(
+            self.conversation_history.append(
                 LLMMessage(
                     role="tool",
                     content=result.output or result.error or "No output",
@@ -163,10 +212,12 @@ class AgentOrchestrator:
         if self.llm_client is None:
             raise ValueError("LLM client is required for autonomous execution")
 
-        return await self.llm_client.chat(
-            messages=messages,
+        response = await self.llm_client.chat(
+            messages=self.conversation_history,
             tools=get_tool_definitions(),
         )
+
+        return response
 
     async def run(
         self,
@@ -176,7 +227,7 @@ class AgentOrchestrator:
         on_step: Optional[Callable[[int, LLMResponse], None]] = None,
     ) -> LLMResponse:
         """
-        Run the full task loop until completion or max steps reached.
+        Run full task loop until completion or max steps reached.
 
         Args:
             user_message: The initial user message
@@ -188,26 +239,70 @@ class AgentOrchestrator:
         Returns:
             LLMResponse: The final response from the LLM
         """
-        current_message = user_message
-        response = None
+        # Add initial user message to history
+        self.conversation_history.append(LLMMessage(role="user", content=user_message))
+
+        response: Optional[LLMResponse] = None
 
         for step in range(max_steps):
-            response = await self.step(current_message)
+            if self.llm_client is None:
+                raise ValueError("LLM client is required for autonomous execution")
+
+            # Get response from LLM using conversation history
+            response = await self.llm_client.chat(
+                messages=self.conversation_history,
+                tools=get_tool_definitions(),
+            )
+
+            # Execute tools if requested
+            if response and response.tool_calls:
+                results = await self.execute_tools(response.tool_calls)
+
+                # Add assistant message with tool calls to history
+                self.conversation_history.append(
+                    LLMMessage(
+                        role="assistant",
+                        content=response.content or "",
+                        tool_calls=response.tool_calls,
+                    )
+                )
+
+                # Add tool results to history
+                for tool_call, result in zip(response.tool_calls, results):
+                    self.conversation_history.append(
+                        LLMMessage(
+                            role="tool",
+                            content=result.output or result.error or "No output",
+                            tool_call_id=tool_call.call_id,
+                            name=tool_call.name.value,
+                        )
+                    )
+            elif response and response.content:
+                # Add final assistant response to history
+                self.conversation_history.append(
+                    LLMMessage(
+                        role="assistant",
+                        content=response.content,
+                    )
+                )
 
             # Call step callback if provided
-            if on_step:
+            if on_step and response:
                 on_step(step + 1, response)
 
             # Check if task is complete
-            if completion_check and completion_check(response):
+            if completion_check and response and completion_check(response):
                 break
 
             # Check if no more tool calls
-            if not response.tool_calls:
+            if response and not response.tool_calls:
                 break
 
-            # Continue with the next response
-            current_message = response.content or ""
+        # Ensure we always return a valid response
+        if response is None:
+            response = LLMResponse(
+                content="No response generated", finish_reason="stop"
+            )
 
         return response
 

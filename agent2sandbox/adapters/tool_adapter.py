@@ -4,6 +4,7 @@ Tool Adapter - Converts tool calls to sandbox operations.
 
 from typing import Optional
 from opensandbox import Sandbox
+from opensandbox.models.filesystem import SearchEntry
 from code_interpreter import CodeInterpreter, SupportedLanguage
 
 from agent2sandbox.core.types import (
@@ -17,7 +18,9 @@ from agent2sandbox.core.types import (
 class ToolAdapter:
     """Adapts tool calls to sandbox operations."""
 
-    def __init__(self, sandbox: Sandbox, code_interpreter: Optional[CodeInterpreter] = None):
+    def __init__(
+        self, sandbox: Sandbox, code_interpreter: Optional[CodeInterpreter] = None
+    ):
         self.sandbox = sandbox
         self.code_interpreter = code_interpreter
 
@@ -59,20 +62,97 @@ class ToolAdapter:
 
         result = await self.sandbox.commands.run(command)
 
+        # Check if result is None
+        if result is None:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                error="Command execution returned None",
+                call_id=tool_call.call_id,
+            )
+
+        # Check for execution error
+        if result.error:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                error=f"{result.error.name}: {result.error.value}",
+                call_id=tool_call.call_id,
+            )
+
         # Extract stdout and stderr
-        stdout = "\n".join([msg.text for msg in result.logs.stdout]) if result.logs.stdout else ""
-        stderr = "\n".join([msg.text for msg in result.logs.stderr]) if result.logs.stderr else ""
+        try:
+            stdout = (
+                "\n".join([msg.text for msg in result.logs.stdout])
+                if result.logs.stdout
+                else ""
+            )
+            stderr = (
+                "\n".join([msg.text for msg in result.logs.stderr])
+                if result.logs.stderr
+                else ""
+            )
 
-        output = stdout
-        if stderr:
-            output += "\n" + stderr
+            output = stdout
+            if stderr:
+                output += "\n" + stderr
 
-        return ToolResult(
-            status=ToolStatus.SUCCESS if result.exit_code == 0 else ToolStatus.ERROR,
-            output=output,
-            error=stderr if result.exit_code != 0 else None,
-            call_id=tool_call.call_id,
-        )
+            return ToolResult(
+                status=ToolStatus.SUCCESS,
+                output=output,
+                error=None,
+                call_id=tool_call.call_id,
+            )
+        except Exception as e:
+            import traceback
+
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                error=f"Failed to process command result: {str(e)}\n{traceback.format_exc()}",
+                call_id=tool_call.call_id,
+            )
+
+        result = await self.sandbox.commands.run(command)
+
+        # Check if result is None
+        if result is None:
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                error="Command execution returned None",
+                call_id=tool_call.call_id,
+            )
+
+        # Extract stdout and stderr
+        try:
+            stdout = (
+                "\n".join([msg.text for msg in result.logs.stdout])
+                if result.logs.stdout
+                else ""
+            )
+            stderr = (
+                "\n".join([msg.text for msg in result.logs.stderr])
+                if result.logs.stderr
+                else ""
+            )
+
+            output = stdout
+            if stderr:
+                output += "\n" + stderr
+
+            return ToolResult(
+                status=ToolStatus.SUCCESS
+                if result.exit_code == 0
+                else ToolStatus.ERROR,
+                output=output,
+                error=stderr if result.exit_code != 0 else None,
+                call_id=tool_call.call_id,
+            )
+        except Exception as e:
+            import traceback
+
+            return ToolResult(
+                status=ToolStatus.ERROR,
+                error=f"Failed to process command result: {str(e)}\n{traceback.format_exc()}",
+                call_id=tool_call.call_id,
+            )
 
     async def _read_file(self, tool_call: ToolCall) -> ToolResult:
         """Read a file from the sandbox."""
@@ -130,7 +210,8 @@ class ToolAdapter:
         pattern = tool_call.arguments.get("pattern", "*")
 
         try:
-            files = await self.sandbox.files.search_files(path, pattern=pattern)
+            entry = SearchEntry(path=path, pattern=pattern)
+            files = await self.sandbox.files.search(entry)
             return ToolResult(
                 status=ToolStatus.SUCCESS,
                 data=[f.path for f in files],
@@ -175,16 +256,26 @@ class ToolAdapter:
 
             supported_lang = lang_map.get(language.lower(), SupportedLanguage.PYTHON)
 
-            result = await self.code_interpreter.codes.run(code, language=supported_lang)
+            result = await self.code_interpreter.codes.run(
+                code, language=supported_lang
+            )
 
             # Extract output
-            stdout = "\n".join([msg.text for msg in result.logs.stdout]) if result.logs.stdout else ""
-            stderr = "\n".join([msg.text for msg in result.logs.stderr]) if result.logs.stderr else ""
+            stdout = (
+                "\n".join([msg.text for msg in result.logs.stdout])
+                if result.logs.stdout
+                else ""
+            )
+            stderr = (
+                "\n".join([msg.text for msg in result.logs.stderr])
+                if result.logs.stderr
+                else ""
+            )
 
             # Extract result (last expression value)
             result_text = None
             if result.result:
-                result_text = "\n".join([msg.text for msg in result.result])
+                result_text = "\n".join([msg.text for msg in result.result if msg.text])
 
             output = stdout
             if result_text:

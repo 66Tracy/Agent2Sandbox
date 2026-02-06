@@ -6,6 +6,7 @@ Tests representative agent tasks with real LLM API and sandbox interaction.
 
 import asyncio
 import sys
+import os
 from pathlib import Path
 
 # Add parent directory to path to import agent2sandbox
@@ -16,6 +17,8 @@ from agent2sandbox.llm import OpenAIClient
 from agent2sandbox import (
     AgentOrchestrator,
     SandboxConfig,
+    ToolCall,
+    ToolName,
 )
 
 
@@ -44,6 +47,8 @@ async def test_data_analysis_task():
     sandbox_config = SandboxConfig(
         image=config.sandbox_image,
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+        domain=os.getenv("SANDBOX_DOMAIN", "localhost:8080"),
+        api_key=os.getenv("SANDBOX_API_KEY"),
     )
 
     llm_client = OpenAIClient.from_config(config)
@@ -53,7 +58,9 @@ async def test_data_analysis_task():
     def on_step(step: int, response):
         tool_calls = response.tool_calls or []
         print(f"\n[Step {step}]")
-        print(f"   Response: {response.content[:80]}{'...' if len(response.content) > 80 else ''}")
+        print(
+            f"   Response: {response.content[:80]}{'...' if len(response.content) > 80 else ''}"
+        )
         print(f"   Tool calls: {len(tool_calls)}")
         if tool_calls:
             for tc in tool_calls:
@@ -105,21 +112,26 @@ async def test_data_analysis_task():
         checks = []
 
         # Check 1: Verify the response contains analysis
-        if any(word in response.content.lower() for word in ['平均', 'mean', '最大', 'max', '最小', 'min']):
+        if response.content and any(
+            word in response.content.lower()
+            for word in ["平均", "mean", "最大", "max", "最小", "min"]
+        ):
             checks.append(("Analysis in response", True))
         else:
             checks.append(("Analysis in response", False))
             success = False
 
         # Check 2: Check if file was created by reading it
+        file_read_result = None
         try:
+            from agent2sandbox import ToolName
+
             file_read_result = await orchestrator.execute_tool(
-                {
-                    "name": "read_file",
-                    "arguments": {"path": "/tmp/analysis.txt"}
-                }
+                ToolCall(
+                    name=ToolName.READ_FILE, arguments={"path": "/tmp/analysis.txt"}
+                )
             )
-            if file_read_result.status == "success" and file_read_result.data:
+            if file_read_result.status.value == "success" and file_read_result.data:
                 checks.append(("File created and readable", True))
                 print(f"\nFile Content:\n{file_read_result.data}")
             else:
@@ -131,7 +143,14 @@ async def test_data_analysis_task():
             success = False
 
         # Check 3: Verify statistics are in the file
-        if 'mean' in file_read_result.data.lower() or '平均' in file_read_result.data:
+        if (
+            file_read_result
+            and file_read_result.data
+            and (
+                "mean" in file_read_result.data.lower()
+                or "平均" in file_read_result.data
+            )
+        ):
             checks.append(("Statistics in file", True))
         else:
             checks.append(("Statistics in file", False))
@@ -181,6 +200,8 @@ async def test_code_debugging_task():
     sandbox_config = SandboxConfig(
         image=config.sandbox_image,
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+        domain=os.getenv("SANDBOX_DOMAIN", "localhost:8080"),
+        api_key=os.getenv("SANDBOX_API_KEY"),
     )
 
     llm_client = OpenAIClient.from_config(config)
@@ -190,7 +211,9 @@ async def test_code_debugging_task():
     def on_step(step: int, response):
         tool_calls = response.tool_calls or []
         print(f"\n[Step {step}]")
-        print(f"   Response: {response.content[:80]}{'...' if len(response.content) > 80 else ''}")
+        print(
+            f"   Response: {response.content[:80]}{'...' if len(response.content) > 80 else ''}"
+        )
         print(f"   Tool calls: {len(tool_calls)}")
         if tool_calls:
             for tc in tool_calls:
@@ -238,21 +261,26 @@ async def test_code_debugging_task():
         checks = []
 
         # Check 1: Verify the response mentions testing and debugging
-        if any(word in response.content.lower() for word in ['test', 'debug', 'debugging', 'fix', '修复', '测试']):
+        if response.content and any(
+            word in response.content.lower()
+            for word in ["test", "debug", "debugging", "fix", "修复", "测试"]
+        ):
             checks.append(("Testing/debugging mentioned", True))
         else:
             checks.append(("Testing/debugging mentioned", False))
             success = False
 
         # Check 2: Verify the final result is 55
-        if '55' in response.content:
+        if response.content and "55" in response.content:
             checks.append(("Correct result (55) in response", True))
         else:
             checks.append(("Correct result (55) in response", False))
             success = False
 
         # Check 3: Verify fibonacci is mentioned
-        if 'fibonacci' in response.content.lower() or '斐波那契' in response.content:
+        if response.content and (
+            "fibonacci" in response.content.lower() or "斐波那契" in response.content
+        ):
             checks.append(("Fibonacci mentioned", True))
         else:
             checks.append(("Fibonacci mentioned", False))
@@ -295,6 +323,16 @@ async def main():
     print("=" * 60)
 
     try:
+        # Check if API_KEY is set
+        config = Config.from_env()
+        if not config.api_key or config.api_key == "YOUR_API_KEY_HERE":
+            print("\n❌ API_KEY not configured!")
+            print(
+                "Please set your API key in agent2sandbox/.env file or via environment variable."
+            )
+            print("Example: API_KEY=your_actual_api_key_here")
+            return 1
+
         # Task 1: Data Analysis
         result1 = await test_data_analysis_task()
 
@@ -330,9 +368,23 @@ async def main():
             print(f"\n⚠️  {total - passed} task(s) failed")
             return 1
 
+    except ValueError as e:
+        if "API_KEY" in str(e):
+            print(f"\n❌ {e}")
+            print("\nPlease set your API key in agent2sandbox/.env file.")
+            return 1
+        raise
     except Exception as e:
         print(f"\n❌ Task execution failed with error: {e}")
         import traceback
+
+        traceback.print_exc()
+        return 1
+
+    except Exception as e:
+        print(f"\n❌ Task execution failed with error: {e}")
+        import traceback
+
         traceback.print_exc()
         return 1
 

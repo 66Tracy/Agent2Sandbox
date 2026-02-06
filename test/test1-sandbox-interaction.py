@@ -13,6 +13,7 @@ The test covers:
 
 import asyncio
 import sys
+import os
 from pathlib import Path
 from datetime import timedelta
 
@@ -20,6 +21,7 @@ from datetime import timedelta
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from opensandbox import Sandbox
+from opensandbox.config import ConnectionConfig
 from code_interpreter import CodeInterpreter, SupportedLanguage
 
 from agent2sandbox import (
@@ -43,13 +45,22 @@ async def test_basic_sandbox_interaction():
     print("Test 1: Basic Sandbox Interaction (Direct OpenSandbox)")
     print("=" * 60)
 
+    # Get connection config
+    domain = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
+    api_key = os.getenv("SANDBOX_API_KEY")
+
+    connection_config = ConnectionConfig(
+        domain=domain,
+        api_key=api_key,
+        request_timeout=timedelta(seconds=60),
+    )
+
     # Create sandbox with code interpreter
     async with await Sandbox.create(
         "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
+        connection_config=connection_config,
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
-        timeout=timedelta(minutes=5),
     ) as sandbox:
-
         # Create code interpreter
         interpreter = await CodeInterpreter.create(sandbox)
 
@@ -66,7 +77,9 @@ list_len = len([i for i in range(10)])
 print(f"List length is: {list_len}")
 result = 2 + 2
 result"""
-        result = await interpreter.codes.run(python_code, language=SupportedLanguage.PYTHON)
+        result = await interpreter.codes.run(
+            python_code, language=SupportedLanguage.PYTHON
+        )
         print(result.logs.stdout[0].text if result.logs.stdout else "No output")
         if result.result:
             print(f"Result: {result.result[0].text}")
@@ -96,6 +109,8 @@ async def test_agent2sandbox_tool_execution():
     config = SandboxConfig(
         image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+        domain=os.getenv("SANDBOX_DOMAIN", "localhost:8080"),
+        api_key=os.getenv("SANDBOX_API_KEY"),
     )
 
     orchestrator = AgentOrchestrator(config)
@@ -110,7 +125,7 @@ async def test_agent2sandbox_tool_execution():
         print("\n[2] Testing execute_command tool...")
         tool_call = ToolCall(
             name=ToolName.EXECUTE_COMMAND,
-            arguments={"command": "echo 'Hello from Agent2Sandbox!'"}
+            arguments={"command": "echo 'Hello from Agent2Sandbox!'"},
         )
         result = await orchestrator.execute_tool(tool_call)
         print(f"   Status: {result.status}")
@@ -122,8 +137,8 @@ async def test_agent2sandbox_tool_execution():
             name=ToolName.WRITE_FILE,
             arguments={
                 "path": "/tmp/test.txt",
-                "content": "This is a test file created by Agent2Sandbox."
-            }
+                "content": "This is a test file created by Agent2Sandbox.",
+            },
         )
         result = await orchestrator.execute_tool(tool_call)
         print(f"   Status: {result.status}")
@@ -132,8 +147,7 @@ async def test_agent2sandbox_tool_execution():
         # Test read_file tool
         print("\n[4] Testing read_file tool...")
         tool_call = ToolCall(
-            name=ToolName.READ_FILE,
-            arguments={"path": "/tmp/test.txt"}
+            name=ToolName.READ_FILE, arguments={"path": "/tmp/test.txt"}
         )
         result = await orchestrator.execute_tool(tool_call)
         print(f"   Status: {result.status}")
@@ -145,8 +159,8 @@ async def test_agent2sandbox_tool_execution():
             name=ToolName.RUN_CODE,
             arguments={
                 "code": "import math\nprint(f'Pi = {math.pi}')\n2 + 2",
-                "language": "python"
-            }
+                "language": "python",
+            },
         )
         result = await orchestrator.execute_tool(tool_call)
         print(f"   Status: {result.status}")
@@ -155,8 +169,7 @@ async def test_agent2sandbox_tool_execution():
         # Test list_files tool
         print("\n[6] Testing list_files tool...")
         tool_call = ToolCall(
-            name=ToolName.LIST_FILES,
-            arguments={"path": "/tmp", "pattern": "*.txt"}
+            name=ToolName.LIST_FILES, arguments={"path": "/tmp", "pattern": "*.txt"}
         )
         result = await orchestrator.execute_tool(tool_call)
         print(f"   Status: {result.status}")
@@ -188,6 +201,8 @@ async def test_agent2sandbox_multi_round():
     config = SandboxConfig(
         image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+        domain=os.getenv("SANDBOX_DOMAIN", "localhost:8080"),
+        api_key=os.getenv("SANDBOX_API_KEY"),
     )
 
     orchestrator = AgentOrchestrator(config)
@@ -209,9 +224,9 @@ async def test_agent2sandbox_multi_round():
 result = fibonacci(10)
 print(f'The 10th Fibonacci number is: {result}')
 result""",
-                        "language": "python"
+                        "language": "python",
                     },
-                    call_id="call_1"
+                    call_id="call_1",
                 )
             ],
         ),
@@ -219,8 +234,8 @@ result""",
         LLMResponse(
             content="The 10th Fibonacci number is 55.",
             tool_calls=None,
-            finish_reason="stop"
-        )
+            finish_reason="stop",
+        ),
     ]
 
     llm_client = MockLLMClient(responses=responses)
@@ -234,8 +249,7 @@ result""",
         # Run multi-round interaction
         print("\n[2] Running multi-round interaction...")
         response = await orchestrator.run(
-            user_message="Calculate the 10th Fibonacci number",
-            max_steps=5
+            user_message="Calculate the 10th Fibonacci number", max_steps=5
         )
 
         print(f"\n[3] Final response: {response.content}")
@@ -262,6 +276,8 @@ async def test_agent2sandbox_with_custom_handler():
     config = SandboxConfig(
         image="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1",
         entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+        domain=os.getenv("SANDBOX_DOMAIN", "localhost:8080"),
+        api_key=os.getenv("SANDBOX_API_KEY"),
     )
 
     orchestrator = AgentOrchestrator(config)
@@ -290,12 +306,12 @@ async def test_agent2sandbox_with_custom_handler():
             ToolCall(
                 name=ToolName.EXECUTE_COMMAND,
                 arguments={"command": "echo 'Custom handler test'"},
-                call_id="call_1"
+                call_id="call_1",
             ),
             ToolCall(
                 name=ToolName.EXECUTE_COMMAND,
                 arguments={"command": "echo 'Second command'"},
-                call_id="call_2"
+                call_id="call_2",
             ),
         ]
 
@@ -330,6 +346,7 @@ async def main():
     except Exception as e:
         print(f"\nTest failed with error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

@@ -10,6 +10,7 @@ from enum import Enum
 
 class ToolName(str, Enum):
     """Enumeration of available tools."""
+
     EXECUTE_COMMAND = "execute_command"
     READ_FILE = "read_file"
     WRITE_FILE = "write_file"
@@ -19,6 +20,7 @@ class ToolName(str, Enum):
 
 class ToolStatus(str, Enum):
     """Status of a tool execution."""
+
     SUCCESS = "success"
     ERROR = "error"
     TIMEOUT = "timeout"
@@ -27,6 +29,7 @@ class ToolStatus(str, Enum):
 @dataclass
 class ToolCall:
     """A tool call request from the Agent."""
+
     name: ToolName
     arguments: Dict[str, Any]
     call_id: Optional[str] = None
@@ -35,6 +38,7 @@ class ToolCall:
 @dataclass
 class ToolResult:
     """Result of a tool execution."""
+
     status: ToolStatus
     output: Optional[str] = None
     error: Optional[str] = None
@@ -45,17 +49,21 @@ class ToolResult:
 @dataclass
 class SandboxConfig:
     """Configuration for sandbox creation."""
+
     image: str = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1"
     entrypoint: Optional[List[str]] = None
     env: Optional[Dict[str, str]] = None
     timeout: timedelta = timedelta(minutes=10)
     cpu_limit: Optional[float] = None
     memory_limit: Optional[int] = None
+    domain: Optional[str] = None
+    api_key: Optional[str] = None
 
 
 @dataclass
 class AgentState:
     """State of the Agent during execution."""
+
     sandbox_id: Optional[str] = None
     is_initialized: bool = False
     tool_call_history: List[ToolCall] = field(default_factory=list)
@@ -66,6 +74,7 @@ class AgentState:
 @dataclass
 class LLMMessage:
     """A message in the conversation with the LLM."""
+
     role: str  # "system", "user", "assistant", "tool"
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
@@ -76,6 +85,7 @@ class LLMMessage:
 @dataclass
 class LLMResponse:
     """Response from the LLM."""
+
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
     finish_reason: Optional[str] = None

@@ -41,7 +41,12 @@ async def test_api_connection():
     # Simple chat request
     print("\n[3] Sending simple chat request...")
     response = await llm_client.chat(
-        messages=[LLMMessage(role="user", content="Hello, please respond with 'API connection successful!'")]
+        messages=[
+            LLMMessage(
+                role="user",
+                content="Hello, please respond with 'API connection successful!'",
+            )
+        ]
     )
 
     print(f"\n[4] Response received:")
@@ -80,7 +85,9 @@ async def test_tool_calling():
     print("\n[2] Sending request with tool definitions...")
     response = await llm_client.chat(
         messages=[
-            LLMMessage(role="user", content="Please execute the command 'echo hello world'")
+            LLMMessage(
+                role="user", content="Please execute the command 'echo hello world'"
+            )
         ],
         tools=tools,
     )
@@ -127,7 +134,8 @@ async def test_multi_turn_conversation():
     response1 = await llm_client.chat(
         messages=[LLMMessage(role="user", content="What is Python?")]
     )
-    print(f"   Response: {response1.content[:100]}...")
+    if response1.content:
+        print(f"   Response: {response1.content[:100]}...")
 
     # Second turn (context aware)
     print("\n[3] Second turn: Follow-up question")
@@ -138,10 +146,11 @@ async def test_multi_turn_conversation():
             LLMMessage(role="user", content="What are its main uses?"),
         ]
     )
-    print(f"   Response: {response2.content[:100]}...")
+    if response2.content:
+        print(f"   Response: {response2.content[:100]}...")
 
     # Verify context is maintained
-    if "uses" in response2.content.lower():
+    if response2.content and "uses" in response2.content.lower():
         print("\n[4] ✅ Multi-turn conversation test PASSED")
         return True
     else:
@@ -186,6 +195,16 @@ async def main():
     print("=" * 60)
 
     try:
+        # Check if API_KEY is set
+        config = Config.from_env()
+        if not config.api_key or config.api_key == "YOUR_API_KEY_HERE":
+            print("\n❌ API_KEY not configured!")
+            print(
+                "Please set your API key in agent2sandbox/.env file or via environment variable."
+            )
+            print("Example: API_KEY=your_actual_api_key_here")
+            return 1
+
         # Test 1: API Connection
         result1 = await test_api_connection()
 
@@ -226,9 +245,16 @@ async def main():
             print(f"\n⚠️  {total - passed} test(s) failed")
             return 1
 
+    except ValueError as e:
+        if "API_KEY" in str(e):
+            print(f"\n❌ {e}")
+            print("\nPlease set your API key in agent2sandbox/.env file.")
+            return 1
+        raise
     except Exception as e:
         print(f"\n❌ Test execution failed with error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 
