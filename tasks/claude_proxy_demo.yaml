@@ -1,0 +1,23 @@
+name: claude-proxy-demo
+image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1
+sandbox_entrypoint:
+  - /opt/opensandbox/code-interpreter.sh
+task_command:
+  - bash
+  - -lc
+  - |
+    set -euo pipefail
+    echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
+    echo "ANTHROPIC_MODEL=${ANTHROPIC_MODEL}"
+    claude --version
+    claude "Reply with exactly: A2S_OK_20260211 and nothing else." | tee /tmp/claude_result.txt
+llm:
+  provider: anthropic
+  proxy_url: http://127.0.0.1:18080
+  model: claude_sonnet4
+  api_key_ref: ENV:ANTHROPIC_AUTH_TOKEN
+goal: Verify claude-code can access model through local LLM proxy.
+finish_condition:
+  type: command_exit_zero
+artifacts:
+  - /tmp/claude_result.txt

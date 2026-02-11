@@ -1,41 +1,18 @@
-"""
-Agent2Sandbox - A lightweight framework for Agent and OpenSandbox interaction.
+"""Agent2Sandbox demo package."""
 
-Core concepts:
-- Environment as Tools: Sandbox operations are exposed as tools to the Agent
-- Agent Orchestrator: Coordinates interaction between Agent, tools, and sandbox
-- Tool Adapter: Converts tool calls to sandbox operations
-- Result Converter: Formats sandbox results for Agent consumption
-"""
-
-from agent2sandbox.core.orchestrator import AgentOrchestrator
-from agent2sandbox.core.state_manager import StateManager
-from agent2sandbox.tools.definitions import get_tool_definitions
-from agent2sandbox.llm.client import LLMClient, OpenAIClient, MockLLMClient
-from agent2sandbox.core.types import (
-    ToolCall,
-    ToolResult,
-    SandboxConfig,
-    AgentState,
-    ToolName,
-    ToolStatus,
-    LLMMessage,
-    LLMResponse,
-)
+from agent2sandbox.demo_runner import DemoRunner, DemoRunResult
+from agent2sandbox.llm_proxy import LLMProxyServer
+from agent2sandbox.settings import ProxyConfig, UpstreamConfig, load_upstream_config
+from agent2sandbox.task_definition import LLMTaskConfig, TaskDefinition, load_task_definition
 
 __all__ = [
-    "AgentOrchestrator",
-    "StateManager",
-    "get_tool_definitions",
-    "LLMClient",
-    "OpenAIClient",
-    "MockLLMClient",
-    "ToolCall",
-    "ToolResult",
-    "SandboxConfig",
-    "AgentState",
-    "ToolName",
-    "ToolStatus",
-    "LLMMessage",
-    "LLMResponse",
+    "DemoRunner",
+    "DemoRunResult",
+    "LLMProxyServer",
+    "ProxyConfig",
+    "UpstreamConfig",
+    "LLMTaskConfig",
+    "TaskDefinition",
+    "load_task_definition",
+    "load_upstream_config",
 ]
