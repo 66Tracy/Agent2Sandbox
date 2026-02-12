@@ -1,4 +1,4 @@
-"""Simple local LLM proxy with sandbox trajectory logging."""
+"""Simple local LLM proxy with model routing and trajectory logging."""
 
 from __future__ import annotations
 
@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from agent2sandbox.settings import ProxyConfig, UpstreamConfig, load_upstream_config
+from agent2sandbox.settings import (
+    LLMProxyRoute,
+    LLMProxyRoutingConfig,
+    ProxyConfig,
+    load_llmproxy_routing_config,
+)
 
 
 def _utc_now() -> str:
@@ -65,6 +70,13 @@ def _anthropic_messages_to_openai(body: dict[str, Any]) -> list[dict[str, str]]:
     return messages
 
 
+def _join_url(base_url: str, suffix: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith(suffix):
+        return base
+    return f"{base}{suffix}"
+
+
 @dataclass
 class ProxySession:
     token: str
@@ -72,6 +84,20 @@ class ProxySession:
     task_name: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass
+class UpstreamHTTPResult:
+    status_code: int
+    content_type: str
+    body: bytes
+
+
+@dataclass
+class ProxyResponse:
+    status_code: int
+    payload: dict[str, Any] | str
+    mode: str = "json"  # json | sse_synth | sse_raw
 
 
 class TrajectoryStore:
@@ -102,8 +128,8 @@ class TrajectoryStore:
 class ProxyRuntime:
     """In-memory runtime state shared by all HTTP handlers."""
 
-    def __init__(self, upstream: UpstreamConfig, proxy: ProxyConfig):
-        self.upstream = upstream
+    def __init__(self, routing: LLMProxyRoutingConfig, proxy: ProxyConfig):
+        self.routing = routing
         self.proxy = proxy
         self.store = TrajectoryStore(proxy.log_dir)
         self._sessions: dict[str, ProxySession] = {}
@@ -165,37 +191,47 @@ class ProxyRuntime:
     def trajectory_path(self, token: str) -> Path:
         return self.store.path_for(token)
 
-    def _upstream_chat_completions(
+    def _parse_json_body(self, result: UpstreamHTTPResult) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(result.body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return None
+        return None
+
+    def _post_json(
         self,
-        openai_payload: dict[str, Any],
-    ) -> tuple[int, dict[str, Any]]:
-        url = self.upstream.base_url.rstrip("/") + "/chat/completions"
-        body = json.dumps(openai_payload).encode("utf-8")
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout_seconds: int,
+    ) -> UpstreamHTTPResult:
+        body = json.dumps(payload).encode("utf-8")
+        merged_headers = {"Content-Type": "application/json"}
+        merged_headers.update(headers)
+
         request = urllib.request.Request(
             url=url,
             data=body,
             method="POST",
-            headers={
-                "Authorization": f"Bearer {self.upstream.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=merged_headers,
         )
-
         try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.upstream.timeout_seconds,
-            ) as response:
-                raw = response.read().decode("utf-8")
-                data = json.loads(raw)
-                return response.getcode(), data
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                content_type = response.headers.get("Content-Type", "application/json")
+                return UpstreamHTTPResult(
+                    status_code=response.getcode(),
+                    content_type=content_type,
+                    body=response.read(),
+                )
         except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            try:
-                data = json.loads(error_body)
-            except json.JSONDecodeError:
-                data = {"error": error_body}
-            return exc.code, data
+            content_type = exc.headers.get("Content-Type", "application/json")
+            return UpstreamHTTPResult(
+                status_code=exc.code,
+                content_type=content_type,
+                body=exc.read(),
+            )
 
     def _anthropic_response_from_openai(
         self,
@@ -223,7 +259,7 @@ class ProxyRuntime:
             "id": f"msg_{uuid4().hex}",
             "type": "message",
             "role": "assistant",
-            "model": requested_model or self.upstream.model_name,
+            "model": requested_model or "unknown-model",
             "content": [{"type": "text", "text": assistant_text}],
             "stop_reason": stop_reason,
             "stop_sequence": None,
@@ -233,18 +269,126 @@ class ProxyRuntime:
             },
         }
 
-    def process_anthropic_messages(
+    def _error_response(self, status_code: int, error_type: str, message: str) -> ProxyResponse:
+        return ProxyResponse(
+            status_code=status_code,
+            payload={
+                "type": "error",
+                "error": {
+                    "type": error_type,
+                    "message": message,
+                },
+            },
+        )
+
+    def _select_route(
         self,
         token: str,
+        downstream_provider: str,
+        requested_model: str,
+    ) -> LLMProxyRoute | None:
+        try:
+            route = self.routing.match(downstream_provider, requested_model)
+        except Exception as exc:
+            self.record_event(
+                token=token,
+                event_type="route_not_found",
+                payload={
+                    "downstream_provider": downstream_provider,
+                    "requested_model": requested_model,
+                    "error": str(exc),
+                },
+            )
+            return None
+        self.record_event(
+            token=token,
+            event_type="route_selected",
+            payload={
+                "route_name": route.name,
+                "downstream_provider": downstream_provider,
+                "downstream_model": requested_model,
+                "upstream_provider": route.upstream_provider,
+                "upstream_model": route.upstream_model,
+            },
+        )
+        return route
+
+    def _process_anthropic_passthrough(
+        self,
+        token: str,
+        route: LLMProxyRoute,
         body: dict[str, Any],
-    ) -> tuple[int, dict[str, Any]]:
-        incoming_model = body.get("model")
+    ) -> ProxyResponse:
+        upstream_payload = dict(body)
+        upstream_payload["model"] = route.upstream_model
+
+        upstream_result = self._post_json(
+            url=_join_url(route.upstream_base_url, "/v1/messages"),
+            payload=upstream_payload,
+            headers={
+                "x-api-key": route.upstream_api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            timeout_seconds=route.timeout_seconds,
+        )
+
+        stream_requested = body.get("stream") is True
+        if upstream_result.status_code >= 400:
+            decoded = upstream_result.body.decode("utf-8", errors="replace")
+            self.record_event(
+                token=token,
+                event_type="upstream_error",
+                payload={
+                    "status_code": upstream_result.status_code,
+                    "upstream_provider": route.upstream_provider,
+                    "error": decoded[:1000],
+                },
+            )
+            return self._error_response(
+                status_code=upstream_result.status_code,
+                error_type="upstream_error",
+                message=decoded,
+            )
+
+        self.record_event(
+            token=token,
+            event_type="anthropic_passthrough",
+            payload={
+                "route_name": route.name,
+                "stream": stream_requested,
+                "status_code": upstream_result.status_code,
+                "content_type": upstream_result.content_type,
+            },
+        )
+
+        if stream_requested and "text/event-stream" in upstream_result.content_type.lower():
+            return ProxyResponse(
+                status_code=upstream_result.status_code,
+                payload=upstream_result.body.decode("utf-8", errors="replace"),
+                mode="sse_raw",
+            )
+
+        parsed = self._parse_json_body(upstream_result)
+        if parsed is None:
+            return self._error_response(
+                status_code=502,
+                error_type="invalid_upstream_response",
+                message="Anthropic upstream returned non-JSON response",
+            )
+        return ProxyResponse(status_code=upstream_result.status_code, payload=parsed, mode="json")
+
+    def _process_anthropic_to_openai(
+        self,
+        token: str,
+        route: LLMProxyRoute,
+        body: dict[str, Any],
+    ) -> ProxyResponse:
+        requested_model = body.get("model")
         openai_payload: dict[str, Any] = {
-            "model": self.upstream.model_name,
+            "model": route.upstream_model,
             "messages": _anthropic_messages_to_openai(body),
             "max_tokens": int(body.get("max_tokens", 1024)),
         }
-
         if "temperature" in body:
             openai_payload["temperature"] = body["temperature"]
         if "top_p" in body:
@@ -253,48 +397,147 @@ class ProxyRuntime:
         if stop_sequences:
             openai_payload["stop"] = stop_sequences
 
-        self.record_event(
-            token=token,
-            event_type="anthropic_request",
-            payload={
-                "requested_model": incoming_model,
-                "upstream_model": self.upstream.model_name,
-                "messages_count": len(openai_payload["messages"]),
-                "max_tokens": openai_payload["max_tokens"],
-            },
+        upstream_result = self._post_json(
+            url=_join_url(route.upstream_base_url, "/chat/completions"),
+            payload=openai_payload,
+            headers={"Authorization": f"Bearer {route.upstream_api_key}"},
+            timeout_seconds=route.timeout_seconds,
         )
+        upstream_json = self._parse_json_body(upstream_result)
+        if upstream_json is None:
+            decoded = upstream_result.body.decode("utf-8", errors="replace")
+            return self._error_response(
+                status_code=502,
+                error_type="invalid_upstream_response",
+                message=decoded,
+            )
 
-        status_code, upstream_response = self._upstream_chat_completions(openai_payload)
-        if status_code >= 400:
+        if upstream_result.status_code >= 400:
             self.record_event(
                 token=token,
                 event_type="upstream_error",
                 payload={
-                    "status_code": status_code,
-                    "error": upstream_response,
+                    "status_code": upstream_result.status_code,
+                    "upstream_provider": route.upstream_provider,
+                    "error": upstream_json,
                 },
             )
-            return status_code, {
-                "type": "error",
-                "error": {
-                    "type": "upstream_error",
-                    "message": json.dumps(upstream_response, ensure_ascii=True),
-                },
-            }
+            return self._error_response(
+                status_code=upstream_result.status_code,
+                error_type="upstream_error",
+                message=json.dumps(upstream_json, ensure_ascii=True),
+            )
 
         anthropic_response = self._anthropic_response_from_openai(
-            openai_response=upstream_response,
-            requested_model=incoming_model if isinstance(incoming_model, str) else None,
+            openai_response=upstream_json,
+            requested_model=requested_model if isinstance(requested_model, str) else None,
         )
         self.record_event(
             token=token,
-            event_type="anthropic_response",
+            event_type="anthropic_converted_response",
             payload={
-                "status_code": status_code,
+                "route_name": route.name,
+                "status_code": upstream_result.status_code,
                 "output_tokens": anthropic_response["usage"]["output_tokens"],
             },
         )
-        return 200, anthropic_response
+        if body.get("stream") is True:
+            return ProxyResponse(
+                status_code=200,
+                payload=anthropic_response,
+                mode="sse_synth",
+            )
+        return ProxyResponse(status_code=200, payload=anthropic_response, mode="json")
+
+    def process_anthropic_messages(
+        self,
+        token: str,
+        body: dict[str, Any],
+    ) -> ProxyResponse:
+        requested_model = str(body.get("model", "")).strip()
+        if not requested_model:
+            return self._error_response(
+                status_code=400,
+                error_type="bad_request",
+                message="`model` is required in anthropic request body",
+            )
+
+        self.record_event(
+            token=token,
+            event_type="anthropic_request",
+            payload={
+                "requested_model": requested_model,
+                "stream": body.get("stream") is True,
+                "messages_count": len(body.get("messages", []))
+                if isinstance(body.get("messages"), list)
+                else 0,
+            },
+        )
+
+        route = self._select_route(
+            token=token,
+            downstream_provider="anthropic",
+            requested_model=requested_model,
+        )
+        if route is None:
+            return self._error_response(
+                status_code=404,
+                error_type="route_not_found",
+                message=f"No route for anthropic model: {requested_model}",
+            )
+
+        if route.upstream_provider == "anthropic":
+            return self._process_anthropic_passthrough(token=token, route=route, body=body)
+        return self._process_anthropic_to_openai(token=token, route=route, body=body)
+
+    def process_openai_chat_completions(
+        self,
+        token: str,
+        body: dict[str, Any],
+    ) -> ProxyResponse:
+        requested_model = str(body.get("model", "")).strip()
+        if not requested_model:
+            return self._error_response(
+                status_code=400,
+                error_type="bad_request",
+                message="`model` is required in openai request body",
+            )
+
+        route = self._select_route(
+            token=token,
+            downstream_provider="openai",
+            requested_model=requested_model,
+        )
+        if route is None:
+            return self._error_response(
+                status_code=404,
+                error_type="route_not_found",
+                message=f"No route for openai model: {requested_model}",
+            )
+        if route.upstream_provider != "openai":
+            return self._error_response(
+                status_code=501,
+                error_type="unsupported_conversion",
+                message="openai downstream to anthropic upstream conversion is not implemented",
+            )
+
+        payload = dict(body)
+        payload["model"] = route.upstream_model
+        upstream_result = self._post_json(
+            url=_join_url(route.upstream_base_url, "/chat/completions"),
+            payload=payload,
+            headers={"Authorization": f"Bearer {route.upstream_api_key}"},
+            timeout_seconds=route.timeout_seconds,
+        )
+        upstream_json = self._parse_json_body(upstream_result)
+        if upstream_json is None:
+            decoded = upstream_result.body.decode("utf-8", errors="replace")
+            return self._error_response(
+                status_code=502,
+                error_type="invalid_upstream_response",
+                message=decoded,
+            )
+        return ProxyResponse(status_code=upstream_result.status_code, payload=upstream_json)
 
 
 class ProxyRequestHandler(BaseHTTPRequestHandler):
@@ -303,13 +546,22 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     server: "ProxyHTTPServer"
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Keep proxy output quiet; logs are captured in trajectory files.
         return
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_sse_raw(self, payload: str) -> None:
+        body = payload.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -331,7 +583,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             "model": payload.get("model"),
             "stop_reason": None,
             "stop_sequence": None,
-            "usage": {"input_tokens": payload.get("usage", {}).get("input_tokens", 0), "output_tokens": 0},
+            "usage": {
+                "input_tokens": payload.get("usage", {}).get("input_tokens", 0),
+                "output_tokens": 0,
+            },
         }
         usage = payload.get("usage", {})
         output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
@@ -415,15 +670,31 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "upstream_base_url": self.server.runtime.upstream.base_url,
-                    "upstream_model": self.server.runtime.upstream.model_name,
+                    "routes": len(self.server.runtime.routing.routes),
+                },
+            )
+            return
+        if path == "/routes":
+            self._send_json(
+                200,
+                {
+                    "routes": [
+                        {
+                            "name": route.name,
+                            "downstream_provider": route.downstream_provider,
+                            "downstream_model": route.downstream_model,
+                            "upstream_provider": route.upstream_provider,
+                            "upstream_base_url": route.upstream_base_url,
+                            "upstream_model": route.upstream_model,
+                        }
+                        for route in self.server.runtime.routing.routes
+                    ]
                 },
             )
             return
         if path == "/sessions":
             self._send_json(200, {"sessions": self.server.runtime.sessions_snapshot()})
             return
-
         self._send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
@@ -475,16 +746,28 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True})
             return
 
-        if path.endswith("/v1/messages"):
-            token = self._extract_token(body=body)
-            status_code, response_payload = self.server.runtime.process_anthropic_messages(
+        token = self._extract_token(body=body)
+        if path in {"/v1/messages", "/v1/message"}:
+            response = self.server.runtime.process_anthropic_messages(token=token, body=body)
+            if response.mode == "sse_raw" and isinstance(response.payload, str):
+                self._send_sse_raw(response.payload)
+            elif response.mode == "sse_synth" and isinstance(response.payload, dict):
+                self._send_sse_message(response.payload)
+            elif isinstance(response.payload, dict):
+                self._send_json(response.status_code, response.payload)
+            else:
+                self._send_json(500, {"error": "invalid_proxy_response"})
+            return
+
+        if path == "/v1/chat/completions":
+            response = self.server.runtime.process_openai_chat_completions(
                 token=token,
                 body=body,
             )
-            if body.get("stream") is True and status_code < 400:
-                self._send_sse_message(response_payload)
+            if isinstance(response.payload, dict):
+                self._send_json(response.status_code, response.payload)
             else:
-                self._send_json(status_code, response_payload)
+                self._send_json(500, {"error": "invalid_proxy_response"})
             return
 
         self._send_json(404, {"error": "not_found"})
@@ -501,8 +784,8 @@ class ProxyHTTPServer(ThreadingHTTPServer):
 class LLMProxyServer:
     """Threaded local LLM proxy server with trajectory persistence."""
 
-    def __init__(self, upstream: UpstreamConfig, proxy: ProxyConfig):
-        self.runtime = ProxyRuntime(upstream=upstream, proxy=proxy)
+    def __init__(self, routing: LLMProxyRoutingConfig, proxy: ProxyConfig):
+        self.runtime = ProxyRuntime(routing=routing, proxy=proxy)
         self._httpd = ProxyHTTPServer((proxy.host, proxy.port), runtime=self.runtime)
         self._thread: threading.Thread | None = None
 
@@ -547,6 +830,11 @@ class LLMProxyServer:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local LLM proxy for Agent2Sandbox")
+    parser.add_argument(
+        "--cfg-file",
+        default="config/llmproxy-cfg.yaml",
+        help="Path to llmproxy routing config yaml",
+    )
     parser.add_argument("--env-file", default="agent2sandbox/.env", help="Path to env file")
     parser.add_argument("--host", default="127.0.0.1", help="Proxy listen host")
     parser.add_argument("--port", type=int, default=18080, help="Proxy listen port")
@@ -560,11 +848,11 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    upstream = load_upstream_config(args.env_file)
+    routing = load_llmproxy_routing_config(cfg_file=args.cfg_file, env_file=args.env_file)
     proxy = ProxyConfig(host=args.host, port=args.port, log_dir=Path(args.log_dir))
-    server = LLMProxyServer(upstream=upstream, proxy=proxy)
+    server = LLMProxyServer(routing=routing, proxy=proxy)
     print(f"LLM proxy listening on {proxy.base_url}")
-    print(f"Upstream: {upstream.base_url} (model={upstream.model_name})")
+    print(f"Routes loaded: {len(routing.routes)}")
     with server.running():
         try:
             threading.Event().wait()

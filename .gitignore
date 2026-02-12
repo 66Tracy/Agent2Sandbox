@@ -25,6 +25,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.venv
 
 # IDEs
 .vscode/
@@ -39,3 +40,7 @@ Thumbs.db
 
 # Runtime artifacts
 logs/
+
+# Local secret config
+config/llmproxy-cfg.yaml
+config/sandbox-server-cfg.yaml

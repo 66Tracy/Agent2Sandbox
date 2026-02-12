@@ -11,7 +11,11 @@ from typing import Any
 from uuid import uuid4
 
 from agent2sandbox.llm_proxy import LLMProxyServer
-from agent2sandbox.settings import ProxyConfig, load_upstream_config
+from agent2sandbox.settings import (
+    ProxyConfig,
+    load_llmproxy_routing_config,
+    load_sandbox_server_config,
+)
 from agent2sandbox.task_definition import TaskDefinition, load_task_definition
 
 
@@ -59,11 +63,15 @@ class DemoRunner:
     def __init__(
         self,
         env_file: str | Path = "agent2sandbox/.env",
+        proxy_cfg_file: str | Path = "config/llmproxy-cfg.yaml",
+        sandbox_cfg_file: str | Path = "config/sandbox-server-cfg.yaml",
         proxy_host: str = "127.0.0.1",
         proxy_port: int = 18080,
         trajectory_dir: str | Path = "logs/trajectory",
     ):
         self.env_file = Path(env_file)
+        self.proxy_cfg_file = Path(proxy_cfg_file)
+        self.sandbox_cfg_file = Path(sandbox_cfg_file)
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
         self.trajectory_dir = Path(trajectory_dir)
@@ -80,13 +88,20 @@ class DemoRunner:
             ) from exc
 
         task: TaskDefinition = load_task_definition(task_file)
-        upstream = load_upstream_config(self.env_file)
+        routing = load_llmproxy_routing_config(
+            cfg_file=self.proxy_cfg_file,
+            env_file=self.env_file,
+        )
+        sandbox_server = load_sandbox_server_config(
+            cfg_file=self.sandbox_cfg_file,
+            env_file=self.env_file,
+        )
         proxy = ProxyConfig(
             host=self.proxy_host,
             port=self.proxy_port,
             log_dir=self.trajectory_dir,
         )
-        proxy_server = LLMProxyServer(upstream=upstream, proxy=proxy)
+        proxy_server = LLMProxyServer(routing=routing, proxy=proxy)
 
         session_token = f"a2s_{uuid4().hex}"
         runtime_env = dict(task.env)
@@ -99,12 +114,10 @@ class DemoRunner:
             }
         )
 
-        domain = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
-        api_key = os.getenv("SANDBOX_API_KEY")
         conn = ConnectionConfig(
-            domain=domain,
-            api_key=api_key,
-            request_timeout=timedelta(seconds=90),
+            domain=sandbox_server.domain,
+            api_key=sandbox_server.api_key,
+            request_timeout=timedelta(seconds=sandbox_server.request_timeout_seconds),
         )
 
         command = task.command_as_shell()
@@ -118,7 +131,7 @@ class DemoRunner:
                 payload={
                     "task_name": task.name,
                     "proxy_base_url": proxy.base_url,
-                    "sandbox_domain": domain,
+                    "sandbox_domain": sandbox_server.domain,
                 },
             )
             async with await Sandbox.create(
@@ -184,8 +197,7 @@ class DemoRunner:
         )
 
 
-async def _amain(task_file: str) -> int:
-    runner = DemoRunner()
+async def _amain(task_file: str, runner: DemoRunner) -> int:
     result = await runner.run_task(task_file)
     print("=" * 72)
     print("Agent2Sandbox Demo Runner")
@@ -209,7 +221,18 @@ async def _amain(task_file: str) -> int:
 
 def main() -> None:
     task_file = os.getenv("A2S_TASK_FILE", "tasks/claude_proxy_demo.yaml")
-    raise SystemExit(asyncio.run(_amain(task_file)))
+    runner = DemoRunner(
+        env_file=os.getenv("A2S_ENV_FILE", "agent2sandbox/.env"),
+        proxy_cfg_file=os.getenv("A2S_PROXY_CFG_FILE", "config/llmproxy-cfg.yaml"),
+        sandbox_cfg_file=os.getenv(
+            "A2S_SANDBOX_CFG_FILE",
+            "config/sandbox-server-cfg.yaml",
+        ),
+        proxy_host=os.getenv("A2S_PROXY_HOST", "127.0.0.1"),
+        proxy_port=int(os.getenv("A2S_PROXY_PORT", "18080")),
+        trajectory_dir=os.getenv("A2S_TRAJECTORY_DIR", "logs/trajectory"),
+    )
+    raise SystemExit(asyncio.run(_amain(task_file, runner)))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,13 @@
+version: 1
+server:
+  # OpenSandbox server domain, for example "localhost:8080"
+  domain: localhost:8080
+
+  # Use one of:
+  # 1) static key (not recommended)
+  # api_key: "your_sandbox_api_key"
+  # 2) env reference (recommended)
+  api_key_ref: ENV:SANDBOX_API_KEY
+
+  # HTTP request timeout (seconds)
+  request_timeout_seconds: 90

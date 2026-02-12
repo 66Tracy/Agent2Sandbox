@@ -9,6 +9,11 @@ task_command:
     set -euo pipefail
     echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
     echo "ANTHROPIC_MODEL=${ANTHROPIC_MODEL}"
+    if ! command -v claude >/dev/null 2>&1; then
+      echo "[bootstrap] claude not found, installing @anthropic-ai/claude-code..."
+      npm i -g @anthropic-ai/claude-code@latest
+      hash -r
+    fi
     claude --version
     claude "Reply with exactly: A2S_OK_20260211 and nothing else." | tee /tmp/claude_result.txt
 llm:

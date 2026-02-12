@@ -2,7 +2,14 @@
 
 from agent2sandbox.demo_runner import DemoRunner, DemoRunResult
 from agent2sandbox.llm_proxy import LLMProxyServer
-from agent2sandbox.settings import ProxyConfig, UpstreamConfig, load_upstream_config
+from agent2sandbox.settings import (
+    LLMProxyRoute,
+    LLMProxyRoutingConfig,
+    ProxyConfig,
+    SandboxServerConfig,
+    load_llmproxy_routing_config,
+    load_sandbox_server_config,
+)
 from agent2sandbox.task_definition import LLMTaskConfig, TaskDefinition, load_task_definition
 
 __all__ = [
@@ -10,9 +17,12 @@ __all__ = [
     "DemoRunResult",
     "LLMProxyServer",
     "ProxyConfig",
-    "UpstreamConfig",
+    "LLMProxyRoute",
+    "LLMProxyRoutingConfig",
+    "SandboxServerConfig",
     "LLMTaskConfig",
     "TaskDefinition",
     "load_task_definition",
-    "load_upstream_config",
+    "load_llmproxy_routing_config",
+    "load_sandbox_server_config",
 ]

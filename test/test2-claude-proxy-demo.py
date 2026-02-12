@@ -27,17 +27,25 @@ async def main() -> int:
 
     task_file = Path(os.getenv("A2S_TASK_FILE", "tasks/claude_proxy_demo.yaml"))
     env_file = Path(os.getenv("A2S_ENV_FILE", "agent2sandbox/.env"))
+    proxy_cfg_file = Path(os.getenv("A2S_PROXY_CFG_FILE", "config/llmproxy-cfg.yaml"))
+    sandbox_cfg_file = Path(
+        os.getenv("A2S_SANDBOX_CFG_FILE", "config/sandbox-server-cfg.yaml")
+    )
     proxy_host = os.getenv("A2S_PROXY_HOST", "127.0.0.1")
     proxy_port = int(os.getenv("A2S_PROXY_PORT", "18080"))
     trajectory_dir = Path(os.getenv("A2S_TRAJECTORY_DIR", "logs/trajectory"))
 
     print(f"Task file: {task_file}")
     print(f"Env file: {env_file}")
+    print(f"Proxy cfg: {proxy_cfg_file}")
+    print(f"Sandbox cfg: {sandbox_cfg_file}")
     print(f"Proxy listen: {proxy_host}:{proxy_port}")
     print(f"Trajectory dir: {trajectory_dir}")
 
     runner = DemoRunner(
         env_file=env_file,
+        proxy_cfg_file=proxy_cfg_file,
+        sandbox_cfg_file=sandbox_cfg_file,
         proxy_host=proxy_host,
         proxy_port=proxy_port,
         trajectory_dir=trajectory_dir,

@@ -7,11 +7,17 @@ It is kept as a smoke test for Docker + OpenSandbox Server availability.
 
 import asyncio
 import os
+import sys
 from datetime import timedelta
+from pathlib import Path
 
 from opensandbox import Sandbox
 from opensandbox.config import ConnectionConfig
 from code_interpreter import CodeInterpreter, SupportedLanguage
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from agent2sandbox.settings import load_sandbox_server_config
 
 
 async def test_basic_sandbox_interaction() -> None:
@@ -19,13 +25,19 @@ async def test_basic_sandbox_interaction() -> None:
     print("Test: Basic Sandbox Interaction (Direct OpenSandbox)")
     print("=" * 60)
 
-    domain = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
-    api_key = os.getenv("SANDBOX_API_KEY")
+    env_file = Path("agent2sandbox/.env")
+    sandbox_cfg_file = Path(
+        os.getenv("A2S_SANDBOX_CFG_FILE", "config/sandbox-server-cfg.yaml")
+    )
+    sandbox_cfg = load_sandbox_server_config(
+        cfg_file=sandbox_cfg_file,
+        env_file=env_file,
+    )
 
     connection_config = ConnectionConfig(
-        domain=domain,
-        api_key=api_key,
-        request_timeout=timedelta(seconds=60),
+        domain=sandbox_cfg.domain,
+        api_key=sandbox_cfg.api_key,
+        request_timeout=timedelta(seconds=sandbox_cfg.request_timeout_seconds),
     )
 
     async with await Sandbox.create(
