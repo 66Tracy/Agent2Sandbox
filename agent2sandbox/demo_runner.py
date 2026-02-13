@@ -62,14 +62,12 @@ class DemoRunner:
 
     def __init__(
         self,
-        env_file: str | Path = "agent2sandbox/.env",
         proxy_cfg_file: str | Path = "config/llmproxy-cfg.yaml",
         sandbox_cfg_file: str | Path = "config/sandbox-server-cfg.yaml",
         proxy_host: str = "127.0.0.1",
         proxy_port: int = 18080,
         trajectory_dir: str | Path = "logs/trajectory",
     ):
-        self.env_file = Path(env_file)
         self.proxy_cfg_file = Path(proxy_cfg_file)
         self.sandbox_cfg_file = Path(sandbox_cfg_file)
         self.proxy_host = proxy_host
@@ -88,14 +86,8 @@ class DemoRunner:
             ) from exc
 
         task: TaskDefinition = load_task_definition(task_file)
-        routing = load_llmproxy_routing_config(
-            cfg_file=self.proxy_cfg_file,
-            env_file=self.env_file,
-        )
-        sandbox_server = load_sandbox_server_config(
-            cfg_file=self.sandbox_cfg_file,
-            env_file=self.env_file,
-        )
+        routing = load_llmproxy_routing_config(cfg_file=self.proxy_cfg_file)
+        sandbox_server = load_sandbox_server_config(cfg_file=self.sandbox_cfg_file)
         proxy = ProxyConfig(
             host=self.proxy_host,
             port=self.proxy_port,
@@ -222,7 +214,6 @@ async def _amain(task_file: str, runner: DemoRunner) -> int:
 def main() -> None:
     task_file = os.getenv("A2S_TASK_FILE", "tasks/claude_proxy_demo.yaml")
     runner = DemoRunner(
-        env_file=os.getenv("A2S_ENV_FILE", "agent2sandbox/.env"),
         proxy_cfg_file=os.getenv("A2S_PROXY_CFG_FILE", "config/llmproxy-cfg.yaml"),
         sandbox_cfg_file=os.getenv(
             "A2S_SANDBOX_CFG_FILE",

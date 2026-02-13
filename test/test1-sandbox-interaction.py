@@ -25,14 +25,10 @@ async def test_basic_sandbox_interaction() -> None:
     print("Test: Basic Sandbox Interaction (Direct OpenSandbox)")
     print("=" * 60)
 
-    env_file = Path("agent2sandbox/.env")
     sandbox_cfg_file = Path(
         os.getenv("A2S_SANDBOX_CFG_FILE", "config/sandbox-server-cfg.yaml")
     )
-    sandbox_cfg = load_sandbox_server_config(
-        cfg_file=sandbox_cfg_file,
-        env_file=env_file,
-    )
+    sandbox_cfg = load_sandbox_server_config(cfg_file=sandbox_cfg_file)
 
     connection_config = ConnectionConfig(
         domain=sandbox_cfg.domain,

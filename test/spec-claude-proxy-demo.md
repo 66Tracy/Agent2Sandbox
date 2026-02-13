@@ -8,7 +8,7 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
   - local proxy listening endpoint
   - centralized model routing settings from `config/llmproxy-cfg.yaml`
   - sandbox command execution in `code-interpreter:v1.0.1`
-  - per-session trajectory jsonl output
+  - per-session trajectory QA file output
 - Out of scope:
   - remote MCP/local MCP runtime integration
   - artifact upload channel to external storage
@@ -20,7 +20,6 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 
 ### Inputs
 - Task file: `tasks/claude_proxy_demo.yaml`
-- Env file: `agent2sandbox/.env`
 - Proxy cfg file: `config/llmproxy-cfg.yaml`
 - Sandbox cfg file: `config/sandbox-server-cfg.yaml`
 - Sandbox image: `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.0.1`
@@ -28,7 +27,7 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 
 ### Steps
 1. Start local `LLM-Proxy` at `127.0.0.1:18080`.
-2. Read routing config from `config/llmproxy-cfg.yaml` and resolve key refs from `.env`.
+2. Read routing config from `config/llmproxy-cfg.yaml` and resolve `ENV:*` refs from system environment variables.
 3. Read sandbox server config from `config/sandbox-server-cfg.yaml`.
 4. Create sandbox and inject:
    - `ANTHROPIC_BASE_URL=http://127.0.0.1:18080`
@@ -39,20 +38,24 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
    - `claude --version`
    - `claude "Reply with exactly: A2S_OK_20260211 and nothing else."`
 7. Read `/tmp/claude_result.txt`.
-8. Verify trajectory log file exists: `logs/trajectory/<session>.jsonl`.
-9. Cleanup sandbox and stop proxy.
+8. Verify trajectory directory exists: `logs/trajectory/<session>/`.
+9. Verify QA pair files exist:
+   - `logs/trajectory/<session>/query/<timestamp>.json`
+   - `logs/trajectory/<session>/answer/<timestamp>.json`
+10. Cleanup sandbox and stop proxy.
 
 ### Expected Result
 - command runtime has no error
 - output includes `A2S_OK_20260211` (stdout or artifact)
+- downstream `model` should match one route `name` in `llmproxy-cfg.yaml`
+- downstream protocol is inferred by request path:
+  - `/v1/messages` or `/v1/message` -> anthropic
+  - `/v1/chat/completions` -> openai
 - if route is `anthropic -> anthropic`, proxy must passthrough request/response without schema conversion
 - if route is `anthropic -> openai`, proxy must convert schema before upstream call
-- trajectory file exists and includes:
-  - `session_registered`
-  - `route_selected`
-  - `anthropic_request`
-  - `anthropic_passthrough` or `anthropic_converted_response`
-  - `task_command_finished`
+- trajectory directory contains QA pairs (same timestamp for query/answer):
+  - query payload includes full upstream request body (messages/system/tools/tool_choice)
+  - answer payload includes upstream response body and downstream response body
 - proxy accepts Anthropic `stream=false/true` request mode
 
 ## Failure Classification

@@ -3,27 +3,19 @@ defaults:
   timeout_seconds: 120
 
 routes:
-  # Example A:
-  # Anthropic-format downstream request -> OpenAI-format upstream model (needs conversion)
-  - name: anthropic-to-openai-example
-    downstream:
-      provider: anthropic
-      model: claude_sonnet4
+  # Downstream request model maps to routes[].name.
+  # Example: downstream body has {"model":"deepseek-openai"}.
+  - name: deepseek-openai
     upstream:
       provider: openai
       base_url: https://api.deepseek.com
-      model: deepseek-chat
-      # Prefer ENV ref to avoid hardcoding secrets.
+      upstream_model_name: deepseek-chat
       api_key_ref: ENV:API_KEY
 
-  # Example B:
-  # Anthropic-format downstream request -> Anthropic-format upstream model (direct passthrough)
-  - name: anthropic-to-anthropic-example
-    downstream:
-      provider: anthropic
-      model: deepseek-chat-anthropic
+  # Example: downstream body has {"model":"deepseek-anthropic"}.
+  - name: deepseek-anthropic
     upstream:
       provider: anthropic
       base_url: https://api.deepseek.com/anthropic
-      model: deepseek-chat
+      upstream_model_name: deepseek-chat
       api_key_ref: ENV:API_KEY
