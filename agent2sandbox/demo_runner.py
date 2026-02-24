@@ -96,10 +96,11 @@ class DemoRunner:
         proxy_server = LLMProxyServer(routing=routing, proxy=proxy)
 
         session_token = f"a2s_{uuid4().hex}"
+        proxy_base_url = (task.llm.proxy_url or "").strip() or proxy.base_url
         runtime_env = dict(task.env)
         runtime_env.update(
             {
-                "ANTHROPIC_BASE_URL": proxy.base_url,
+                "ANTHROPIC_BASE_URL": proxy_base_url,
                 "ANTHROPIC_AUTH_TOKEN": session_token,
                 "ANTHROPIC_MODEL": task.llm.model,
                 "IS_SANDBOX": "1",
@@ -122,7 +123,7 @@ class DemoRunner:
                 event_type="runner_started",
                 payload={
                     "task_name": task.name,
-                    "proxy_base_url": proxy.base_url,
+                    "proxy_base_url": proxy_base_url,
                     "sandbox_domain": sandbox_server.domain,
                 },
             )

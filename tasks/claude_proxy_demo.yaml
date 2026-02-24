@@ -18,9 +18,9 @@ task_command:
     claude "Reply with exactly: A2S_OK_20260211 and nothing else." | tee /tmp/claude_result.txt
 llm:
   provider: anthropic
-  proxy_url: http://127.0.0.1:18080
-  model: claude_sonnet4
-  api_key_ref: ENV:ANTHROPIC_AUTH_TOKEN
+  proxy_url: http://host.docker.internal:18080
+  model: deepseek-anthropic
+  api_key_ref: session-test-2
 goal: Verify claude-code can access model through local LLM proxy.
 finish_condition:
   type: command_exit_zero
