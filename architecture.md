@@ -4,7 +4,7 @@
 
 ## 1. 核心目标
 - **任务定义**：`tasks/` 目录以 JSON/YAML 描述任务（镜像、sandbox_entrypoint、task_command、LLM、MCP、目标、结束条件、交付件）。
-- **LLM-Proxy 中心化**：对齐 OpenAI/Anthropic API（非流式），统一路由与鉴权，并按 `sandbox_id` 归档对话历史。
+- **LLM-Proxy 中心化**：支持 OpenAI / Anthropic 协议透传（含流式），统一路由与鉴权，并按 session 归档对话历史。
 - **MCP 分层**：remote / local / internet 三类接口，demo 阶段仅透传配置。
 - **运行时解耦**：sandbox 镜像自带 agent/CLI，容器内直接调用 LLM-Proxy。
 
@@ -25,13 +25,13 @@ Task Runner/Launcher
 Sandbox Runtime (code-interpreter 镜像)
   ├─ sandbox_entrypoint 作为容器主进程启动
   └─ task_command 在容器内执行（由启动脚本或 agent 触发）
-        └─ 调用 LLM-Proxy (OpenAI/Anthropic 兼容)
+        └─ 调用 LLM-Proxy (OpenAI/Anthropic 协议透传)
 
 LLM-Proxy
-  ├─ OpenAI/Anthropic 兼容 API
+  ├─ OpenAI / Anthropic 兼容 API（无互转）
   ├─ 统一鉴权/路由
-  ├─ 按 sandbox_id 归档历史
-  └─ 存储：JSON/JSONL → 可演进 SQLite/PostgreSQL
+  ├─ 按 session 归档历史
+  └─ 存储：JSON 文件 → 可演进 SQLite/PostgreSQL
 
 MCP Services (占位)
   ├─ Remote MCP (集群共享)
@@ -50,9 +50,9 @@ task_command:
   - -lc
   - "claude 'Compute 1+1.'"
 llm:
-  provider: openai  # or anthropic
+  provider: anthropic  # openai 或 anthropic，需与下游协议一致
   proxy_url: http://llm-proxy:8000
-  model: gpt-4o-mini
+  model: deepseek-anthropic
   api_key_ref: ENV:LLM_PROXY_API_KEY
 mcp:
   remote: []
@@ -71,7 +71,7 @@ artifacts:
 
 ## 6. 组件职责
 - **Task Runner/Launcher**：解析任务定义 → 创建 sandbox → 透传配置 → 启动 sandbox_entrypoint。
-- **LLM-Proxy**：兼容 OpenAI/Anthropic（非流式），记录对话历史，未来可切换数据库。
+- **LLM-Proxy**：OpenAI/Anthropic 协议透传，记录对话历史，未来可切换数据库。
 - **MCP 模块**：统一配置结构，后续落地 gRPC over HTTP/2。
 - **监控模块（占位）**：定义心跳/超时/状态检查接口。
 
@@ -81,6 +81,6 @@ artifacts:
 - claude-code 示例参考：`OpenSandbox/examples/claude-code/README.md`
 
 ## 8. 演进路径（简）
-1) 任务定义 + LLM-Proxy 基础 API（非流式）。
+1) 任务定义 + LLM-Proxy 基础 API（透传）。
 2) Launcher 读取任务 → 启动 sandbox → 容器内执行 task_command → 调用 LLM-Proxy。
 3) 引入 MCP 实现与监控/交付件机制。
