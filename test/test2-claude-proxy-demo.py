@@ -57,7 +57,7 @@ async def main() -> int:
     print(f"Task: {result.task_name}")
     print(f"Sandbox ID: {result.sandbox_id}")
     print(f"Session token: {result.session_token}")
-    print(f"Trajectory file: {result.trajectory_file}")
+    print(f"Trajectory dir: {result.trajectory_dir}")
     print(f"Command error: {result.error or 'None'}")
 
     print("\n[2] Command stdout")
@@ -70,13 +70,18 @@ async def main() -> int:
     artifact_content = result.artifacts.get("/tmp/claude_result.txt", "")
     print(artifact_content or "<artifact missing>")
 
+    req_files = list(result.trajectory_dir.glob("*-req.json"))
+    res_files = list(result.trajectory_dir.glob("*-assistant.json"))
+
     checks = [
         ("Command exited without runtime error", result.error is None),
         (
             "Expected token appears in output or artifact",
             EXPECTED_TOKEN in result.stdout or EXPECTED_TOKEN in artifact_content,
         ),
-        ("Trajectory file exists", result.trajectory_file.exists()),
+        ("Trajectory dir exists", result.trajectory_dir.exists()),
+        ("Trajectory has req file", bool(req_files)),
+        ("Trajectory has assistant file", bool(res_files)),
     ]
 
     print("\n[5] Verification")

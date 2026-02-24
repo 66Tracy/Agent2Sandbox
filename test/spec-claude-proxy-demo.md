@@ -40,8 +40,8 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 7. Read `/tmp/claude_result.txt`.
 8. Verify trajectory directory exists: `logs/trajectory/<session>/`.
 9. Verify QA pair files exist:
-   - `logs/trajectory/<session>/query/<timestamp>.json`
-   - `logs/trajectory/<session>/answer/<timestamp>.json`
+   - `logs/trajectory/<session>/<timestamp>-req.json`
+   - `logs/trajectory/<session>/<timestamp>-assistant.json`
 10. Cleanup sandbox and stop proxy.
 
 ### Expected Result
@@ -51,11 +51,10 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 - downstream protocol is inferred by request path:
   - `/v1/messages` or `/v1/message` -> anthropic
   - `/v1/chat/completions` -> openai
-- if route is `anthropic -> anthropic`, proxy must passthrough request/response without schema conversion
-- if route is `anthropic -> openai`, proxy must convert schema before upstream call
-- trajectory directory contains QA pairs (same timestamp for query/answer):
-  - query payload includes full upstream request body (messages/system/tools/tool_choice)
-  - answer payload includes upstream response body and downstream response body
+- route upstream_provider must match downstream protocol (anthropic/openai); mismatch should error
+- trajectory directory contains QA pairs (same timestamp for req/assistant):
+  - req payload stores downstream request in original protocol format
+  - assistant payload stores downstream response in original protocol format
 - proxy accepts Anthropic `stream=false/true` request mode
 
 ## Failure Classification

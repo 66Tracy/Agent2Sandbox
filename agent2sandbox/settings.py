@@ -5,10 +5,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Union
 
 
-def _load_yaml_object(path: Path) -> dict[str, Any]:
+def _load_yaml_object(path: Path) -> Dict[str, Any]:
     try:
         import yaml
     except ImportError as exc:
@@ -22,14 +22,14 @@ def _load_yaml_object(path: Path) -> dict[str, Any]:
     return data
 
 
-def _require(mapping: dict[str, Any], key: str) -> Any:
+def _require(mapping: Dict[str, Any], key: str) -> Any:
     value = mapping.get(key)
     if value is None:
         raise ValueError(f"Missing required config field: {key}")
     return value
 
 
-def _resolve_ref(value: str | None) -> str | None:
+def _resolve_ref(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     text = str(value).strip()
@@ -86,7 +86,7 @@ class LLMProxyRoute:
 class LLMProxyRoutingConfig:
     """Model routing configuration loaded from `config/llmproxy-cfg.yaml`."""
 
-    routes: list[LLMProxyRoute]
+    routes: List[LLMProxyRoute]
     default_timeout_seconds: int = 120
 
     def match(self, requested_model: str) -> LLMProxyRoute:
@@ -110,12 +110,12 @@ class SandboxServerConfig:
     """Sandbox server connection configuration."""
 
     domain: str
-    api_key: str | None = None
+    api_key: Optional[str] = None
     request_timeout_seconds: int = 90
 
 
 def load_llmproxy_routing_config(
-    cfg_file: str | Path = "config/llmproxy-cfg.yaml",
+    cfg_file: Union[str, Path] = "config/llmproxy-cfg.yaml",
 ) -> LLMProxyRoutingConfig:
     """Load and validate LLM proxy routing configuration."""
 
@@ -133,7 +133,7 @@ def load_llmproxy_routing_config(
     if not isinstance(raw_routes, list) or not raw_routes:
         raise ValueError("`routes` must be a non-empty list")
 
-    routes: list[LLMProxyRoute] = []
+    routes: List[LLMProxyRoute] = []
     for idx, route_item in enumerate(raw_routes):
         if not isinstance(route_item, dict):
             raise ValueError(f"routes[{idx}] must be an object")
@@ -194,7 +194,7 @@ def load_llmproxy_routing_config(
 
 
 def load_sandbox_server_config(
-    cfg_file: str | Path = "config/sandbox-server-cfg.yaml",
+    cfg_file: Union[str, Path] = "config/sandbox-server-cfg.yaml",
 ) -> SandboxServerConfig:
     """Load sandbox server configuration from YAML."""
 
@@ -214,7 +214,7 @@ def load_sandbox_server_config(
 
     api_key_ref = server.get("api_key_ref")
     api_key_value = server.get("api_key")
-    api_key: str | None = None
+    api_key: Optional[str] = None
     if api_key_ref is not None:
         api_key = _resolve_ref(str(api_key_ref))
     elif api_key_value is not None:

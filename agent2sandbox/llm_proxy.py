@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 from agent2sandbox.settings import (
@@ -37,7 +36,7 @@ def _extract_text_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
+        parts: List[str] = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 text = block.get("text")
@@ -51,326 +50,11 @@ def _extract_text_content(content: Any) -> str:
     return ""
 
 
-def _normalize_anthropic_content_blocks(content: Any) -> list[dict[str, Any]]:
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    if isinstance(content, list):
-        return [item for item in content if isinstance(item, dict)]
-    if isinstance(content, dict):
-        return [content]
-    return []
-
-
 def _safe_json_loads(raw: str) -> Any:
     try:
         return json.loads(raw)
     except Exception:
         return None
-
-
-def _serialize_block_content(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    text = _extract_text_content(content)
-    if text:
-        return text
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except Exception:
-        return str(content)
-
-
-def _anthropic_tool_choice_to_openai(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"auto", "none"}:
-            return lowered
-        if lowered == "any":
-            return "required"
-        return None
-    if isinstance(value, dict):
-        choice_type = str(value.get("type", "")).strip().lower()
-        if choice_type in {"auto", "none"}:
-            return choice_type
-        if choice_type == "any":
-            return "required"
-        if choice_type == "tool":
-            name = str(value.get("name", "")).strip()
-            if name:
-                return {"type": "function", "function": {"name": name}}
-    return None
-
-
-def _openai_tool_choice_to_anthropic(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"auto", "none"}:
-            return {"type": lowered}
-        if lowered in {"required", "any"}:
-            return {"type": "any"}
-        return None
-    if isinstance(value, dict):
-        choice_type = str(value.get("type", "")).strip().lower()
-        if choice_type == "function":
-            function = value.get("function")
-            if isinstance(function, dict):
-                name = str(function.get("name", "")).strip()
-                if name:
-                    return {"type": "tool", "name": name}
-    return None
-
-
-def _anthropic_tools_to_openai(raw_tools: Any) -> list[dict[str, Any]]:
-    if not isinstance(raw_tools, list):
-        return []
-    tools: list[dict[str, Any]] = []
-    for item in raw_tools:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).strip()
-        if not name:
-            continue
-        schema = item.get("input_schema")
-        if not isinstance(schema, dict):
-            schema = {"type": "object", "properties": {}}
-        function: dict[str, Any] = {
-            "name": name,
-            "parameters": schema,
-        }
-        description = item.get("description")
-        if isinstance(description, str) and description.strip():
-            function["description"] = description
-        tools.append({"type": "function", "function": function})
-    return tools
-
-
-def _openai_tools_to_anthropic(raw_tools: Any) -> list[dict[str, Any]]:
-    if not isinstance(raw_tools, list):
-        return []
-    tools: list[dict[str, Any]] = []
-    for item in raw_tools:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") != "function":
-            continue
-        function = item.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = str(function.get("name", "")).strip()
-        if not name:
-            continue
-        schema = function.get("parameters")
-        if not isinstance(schema, dict):
-            schema = {"type": "object", "properties": {}}
-        tool: dict[str, Any] = {
-            "name": name,
-            "input_schema": schema,
-        }
-        description = function.get("description")
-        if isinstance(description, str) and description.strip():
-            tool["description"] = description
-        tools.append(tool)
-    return tools
-
-
-def _anthropic_messages_to_openai(body: dict[str, Any]) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    system = body.get("system")
-    if system:
-        system_text = _extract_text_content(system)
-        if system_text:
-            messages.append({"role": "system", "content": system_text})
-
-    raw_messages = body.get("messages", [])
-    if not isinstance(raw_messages, list):
-        return messages
-
-    for item in raw_messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "")).strip()
-        if role not in {"user", "assistant", "system"}:
-            continue
-
-        blocks = _normalize_anthropic_content_blocks(item.get("content"))
-        if role == "assistant":
-            text_parts: list[str] = []
-            tool_calls: list[dict[str, Any]] = []
-            for block in blocks:
-                block_type = str(block.get("type", "")).strip()
-                if block_type == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        text_parts.append(text)
-                    continue
-                if block_type != "tool_use":
-                    continue
-                tool_name = str(block.get("name", "")).strip()
-                if not tool_name:
-                    continue
-                call_id = str(block.get("id", "")).strip() or f"call_{uuid4().hex[:12]}"
-                raw_input = block.get("input", {})
-                if not isinstance(raw_input, (dict, list)):
-                    raw_input = {"value": raw_input}
-                tool_calls.append(
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": json.dumps(raw_input, ensure_ascii=False),
-                        },
-                    }
-                )
-
-            assistant_message: dict[str, Any] = {"role": "assistant"}
-            assistant_message["content"] = "\n".join(text_parts) if text_parts else ""
-            if tool_calls:
-                assistant_message["tool_calls"] = tool_calls
-            if assistant_message["content"] or tool_calls:
-                messages.append(assistant_message)
-            continue
-
-        if role == "user":
-            pending_text: list[str] = []
-
-            def _flush_pending_user_text() -> None:
-                if pending_text:
-                    messages.append({"role": "user", "content": "\n".join(pending_text)})
-                    pending_text.clear()
-
-            for block in blocks:
-                block_type = str(block.get("type", "")).strip()
-                if block_type == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        pending_text.append(text)
-                    continue
-                if block_type != "tool_result":
-                    continue
-
-                _flush_pending_user_text()
-                call_id = str(block.get("tool_use_id", "")).strip()
-                tool_text = _serialize_block_content(block.get("content"))
-                if block.get("is_error") is True:
-                    tool_text = f"[tool_error]\n{tool_text}"
-
-                if call_id:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": tool_text,
-                        }
-                    )
-                else:
-                    pending_text.append(tool_text)
-
-            _flush_pending_user_text()
-            continue
-
-        # role == "system"
-        content = _extract_text_content(item.get("content"))
-        if content:
-            messages.append({"role": "system", "content": content})
-
-    return messages
-
-
-def _openai_messages_to_anthropic(
-    raw_messages: Any,
-) -> tuple[list[dict[str, Any]], str | list[dict[str, Any]] | None]:
-    if not isinstance(raw_messages, list):
-        return [], None
-
-    system_parts: list[str] = []
-    anthropic_messages: list[dict[str, Any]] = []
-    for item in raw_messages:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "")).strip()
-        if role == "system":
-            system_text = _serialize_block_content(item.get("content"))
-            if system_text:
-                system_parts.append(system_text)
-            continue
-
-        if role == "tool":
-            tool_call_id = str(item.get("tool_call_id", "")).strip()
-            if not tool_call_id:
-                continue
-            tool_text = _serialize_block_content(item.get("content"))
-            anthropic_messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_call_id,
-                            "content": tool_text,
-                        }
-                    ],
-                }
-            )
-            continue
-
-        if role == "assistant":
-            content_blocks: list[dict[str, Any]] = []
-            assistant_text = _serialize_block_content(item.get("content"))
-            if assistant_text:
-                content_blocks.append({"type": "text", "text": assistant_text})
-            tool_calls = item.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for call in tool_calls:
-                    if not isinstance(call, dict):
-                        continue
-                    function = call.get("function")
-                    if not isinstance(function, dict):
-                        continue
-                    name = str(function.get("name", "")).strip()
-                    if not name:
-                        continue
-                    call_id = str(call.get("id", "")).strip() or f"toolu_{uuid4().hex[:12]}"
-                    raw_args = function.get("arguments", "{}")
-                    if isinstance(raw_args, str):
-                        parsed_args = _safe_json_loads(raw_args)
-                    else:
-                        parsed_args = raw_args
-                    if not isinstance(parsed_args, (dict, list)):
-                        parsed_args = {"value": parsed_args if parsed_args is not None else raw_args}
-                    content_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": call_id,
-                            "name": name,
-                            "input": parsed_args,
-                        }
-                    )
-            if content_blocks:
-                anthropic_messages.append({"role": "assistant", "content": content_blocks})
-            continue
-
-        if role == "user":
-            user_text = _serialize_block_content(item.get("content"))
-            if user_text:
-                anthropic_messages.append(
-                    {
-                        "role": "user",
-                        "content": [{"type": "text", "text": user_text}],
-                    }
-                )
-
-    if not system_parts:
-        return anthropic_messages, None
-    if len(system_parts) == 1:
-        return anthropic_messages, system_parts[0]
-    return anthropic_messages, [{"type": "text", "text": "\n".join(system_parts)}]
 
 
 def _join_url(base_url: str, suffix: str) -> str:
@@ -383,8 +67,8 @@ def _join_url(base_url: str, suffix: str) -> str:
 @dataclass
 class ProxySession:
     token: str
-    sandbox_id: str | None
-    task_name: str | None
+    sandbox_id: Optional[str]
+    task_name: Optional[str]
     created_at: str
     updated_at: str
 
@@ -399,7 +83,7 @@ class UpstreamHTTPResult:
 @dataclass
 class ProxyResponse:
     status_code: int
-    payload: dict[str, Any] | str
+    payload: Union[Dict[str, Any], str]
     mode: str = "json"  # json | sse_synth | sse_raw
 
 
@@ -410,7 +94,7 @@ class TrajectoryStore:
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._suffix_counter: dict[tuple[str, str], int] = {}
+        self._suffix_counter: Dict[Tuple[str, str], int] = {}
 
     def _session_dir(self, token: str) -> Path:
         session_dir = self.log_dir / _safe_file_token(token)
@@ -426,43 +110,25 @@ class TrajectoryStore:
             return base
         return f"{base}-{count:03d}"
 
-    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
+    def _write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
 
-    def append(self, token: str, event_type: str, payload: dict[str, Any]) -> Path:
-        session_dir = self._session_dir(token)
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S-%f")
-        event_name = _safe_file_token(event_type)
-        path = session_dir / "events" / f"{stamp}-{event_name}.json"
-        record = {"timestamp": _utc_now(), "event_type": event_type, "payload": payload}
-        with self._lock:
-            self._write_json(path, record)
-        return path
-
-    def write_query(self, token: str, payload: dict[str, Any]) -> str:
+    def write_qa(
+        self,
+        token: str,
+        request_payload: Dict[str, Any],
+        response_payload: Dict[str, Any],
+    ) -> str:
         with self._lock:
             stamp = self._alloc_stamp(token)
-            path = self._session_dir(token) / "query" / f"{stamp}.json"
-            record = {
-                "timestamp": stamp,
-                "captured_at": _utc_now(),
-                "payload": payload,
-            }
-            self._write_json(path, record)
+            session_dir = self._session_dir(token)
+            req_path = session_dir / f"{stamp}-req.json"
+            res_path = session_dir / f"{stamp}-assistant.json"
+            self._write_json(req_path, request_payload)
+            self._write_json(res_path, response_payload)
         return stamp
-
-    def write_answer(self, token: str, stamp: str, payload: dict[str, Any]) -> Path:
-        with self._lock:
-            path = self._session_dir(token) / "answer" / f"{stamp}.json"
-            record = {
-                "timestamp": stamp,
-                "captured_at": _utc_now(),
-                "payload": payload,
-            }
-            self._write_json(path, record)
-        return path
 
     def path_for(self, token: str) -> Path:
         return self._session_dir(token)
@@ -475,15 +141,15 @@ class ProxyRuntime:
         self.routing = routing
         self.proxy = proxy
         self.store = TrajectoryStore(proxy.log_dir)
-        self._sessions: dict[str, ProxySession] = {}
+        self._sessions: Dict[str, ProxySession] = {}
         self._lock = threading.Lock()
-        self._reasoning_by_token: dict[str, dict[str, str]] = {}
+        self._reasoning_by_token: Dict[str, Dict[str, str]] = {}
 
     def register_session(
         self,
         token: str,
-        sandbox_id: str | None,
-        task_name: str | None,
+        sandbox_id: Optional[str],
+        task_name: Optional[str],
     ) -> ProxySession:
         now = _utc_now()
         with self._lock:
@@ -501,25 +167,17 @@ class ProxyRuntime:
                 session.sandbox_id = sandbox_id or session.sandbox_id
                 session.task_name = task_name or session.task_name
                 session.updated_at = now
-        self.store.append(
-            token=token,
-            event_type="session_registered",
-            payload={
-                "sandbox_id": sandbox_id,
-                "task_name": task_name,
-            },
-        )
         return session
 
-    def record_event(self, token: str, event_type: str, payload: dict[str, Any]) -> None:
+    def record_event(self, token: str, event_type: str, payload: Dict[str, Any]) -> None:
         now = _utc_now()
         with self._lock:
             session = self._sessions.get(token)
             if session:
                 session.updated_at = now
-        self.store.append(token=token, event_type=event_type, payload=payload)
+        # Intentionally skip persisting event logs to keep trajectory logs focused on QA pairs.
 
-    def sessions_snapshot(self) -> list[dict[str, Any]]:
+    def sessions_snapshot(self) -> List[Dict[str, Any]]:
         with self._lock:
             return [
                 {
@@ -538,7 +196,7 @@ class ProxyRuntime:
     def _remember_reasoning_for_tool_calls(
         self,
         token: str,
-        openai_response: dict[str, Any],
+        openai_response: Dict[str, Any],
     ) -> None:
         choices = openai_response.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -556,7 +214,7 @@ class ProxyRuntime:
         if not isinstance(tool_calls, list):
             return
 
-        call_ids: list[str] = []
+        call_ids: List[str] = []
         for call in tool_calls:
             if not isinstance(call, dict):
                 continue
@@ -579,7 +237,7 @@ class ProxyRuntime:
     def _inject_reasoning_content(
         self,
         token: str,
-        messages: list[dict[str, Any]],
+        messages: List[Dict[str, Any]],
     ) -> None:
         with self._lock:
             token_cache = dict(self._reasoning_by_token.get(token, {}))
@@ -598,7 +256,7 @@ class ProxyRuntime:
             if not isinstance(tool_calls, list) or not tool_calls:
                 continue
 
-            reasoning_value: str | None = None
+            reasoning_value: Optional[str] = None
             for call in tool_calls:
                 if not isinstance(call, dict):
                     continue
@@ -613,65 +271,47 @@ class ProxyRuntime:
             if reasoning_value:
                 message["reasoning_content"] = reasoning_value
 
-    def _masked_headers(self, headers: dict[str, str]) -> dict[str, str]:
-        masked: dict[str, str] = {}
-        for key, value in headers.items():
-            lowered = key.lower()
-            if lowered in {"authorization", "x-api-key", "api-key"}:
-                masked[key] = "***"
-            else:
-                masked[key] = value
-        return masked
+    def _should_skip_trajectory(self, request_payload: Dict[str, Any]) -> bool:
+        messages = request_payload.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role", "")).strip()
+                content = message.get("content")
+                if role == "user":
+                    user_text = _extract_text_content(content).strip()
+                    if user_text.lower() == "warmup":
+                        return True
+                    lowered = user_text.lower()
+                    if "analyze if this message indicates a new conversation topic" in lowered:
+                        return True
+                    break
 
-    def _log_upstream_query(
+        system_text = _extract_text_content(request_payload.get("system")).lower()
+        if "summarize this coding conversation" in system_text:
+            return True
+        if "analyze if this message indicates a new conversation topic" in system_text:
+            return True
+        return False
+
+    def _log_downstream_qa(
         self,
         token: str,
-        route: LLMProxyRoute,
-        downstream_protocol: str,
-        upstream_url: str,
-        upstream_headers: dict[str, str],
-        upstream_payload: dict[str, Any],
-    ) -> str:
-        return self.store.write_query(
+        request_payload: Optional[Dict[str, Any]],
+        response_payload: Optional[Dict[str, Any]],
+    ) -> None:
+        if request_payload is None or response_payload is None:
+            return
+        if self._should_skip_trajectory(request_payload):
+            return
+        self.store.write_qa(
             token=token,
-            payload={
-                "route_name": route.name,
-                "downstream_protocol": downstream_protocol,
-                "upstream_provider": route.upstream_provider,
-                "upstream_url": upstream_url,
-                "upstream_headers": self._masked_headers(upstream_headers),
-                "request_body": upstream_payload,
-            },
+            request_payload=request_payload,
+            response_payload=response_payload,
         )
 
-    def _log_upstream_answer(
-        self,
-        token: str,
-        stamp: str,
-        route: LLMProxyRoute,
-        downstream_protocol: str,
-        upstream_result: UpstreamHTTPResult,
-        upstream_json: dict[str, Any] | None = None,
-        downstream_payload: dict[str, Any] | None = None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "route_name": route.name,
-            "downstream_protocol": downstream_protocol,
-            "upstream_provider": route.upstream_provider,
-            "status_code": upstream_result.status_code,
-            "content_type": upstream_result.content_type,
-        }
-        if upstream_json is not None:
-            payload["upstream_response_body"] = upstream_json
-        else:
-            payload["upstream_response_text"] = upstream_result.body.decode(
-                "utf-8", errors="replace"
-            )
-        if downstream_payload is not None:
-            payload["downstream_response_body"] = downstream_payload
-        self.store.write_answer(token=token, stamp=stamp, payload=payload)
-
-    def _parse_json_body(self, result: UpstreamHTTPResult) -> dict[str, Any] | None:
+    def _parse_json_body(self, result: UpstreamHTTPResult) -> Optional[Dict[str, Any]]:
         try:
             parsed = json.loads(result.body.decode("utf-8"))
             if isinstance(parsed, dict):
@@ -680,11 +320,220 @@ class ProxyRuntime:
             return None
         return None
 
+    def _anthropic_response_from_sse(self, payload: str) -> Optional[Dict[str, Any]]:
+        content_blocks: List[Dict[str, Any]] = []
+        blocks_by_index: Dict[int, Dict[str, Any]] = {}
+        input_buffers: Dict[int, str] = {}
+        response: Dict[str, Any] = {
+            "id": f"msg_{uuid4().hex}",
+            "type": "message",
+            "role": "assistant",
+            "model": "",
+            "content": content_blocks,
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+        }
+        usage: Dict[str, Any] = {}
+
+        for raw_line in payload.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            event = _safe_json_loads(data)
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type", "")).strip()
+            if event_type == "message_start":
+                message = event.get("message")
+                if isinstance(message, dict):
+                    response["id"] = message.get("id", response["id"])
+                    response["model"] = message.get("model", response.get("model", ""))
+                    response["role"] = message.get("role", "assistant")
+                    if "usage" in message and isinstance(message["usage"], dict):
+                        usage.update(message["usage"])
+                continue
+            if event_type == "content_block_start":
+                index = event.get("index")
+                block = event.get("content_block")
+                if isinstance(index, int) and isinstance(block, dict):
+                    blocks_by_index[index] = dict(block)
+                continue
+            if event_type == "content_block_delta":
+                index = event.get("index")
+                delta = event.get("delta")
+                if not isinstance(index, int) or not isinstance(delta, dict):
+                    continue
+                block = blocks_by_index.setdefault(index, {"type": delta.get("type", "text")})
+                delta_type = str(delta.get("type", "")).strip()
+                if delta_type == "text_delta":
+                    text = delta.get("text")
+                    if isinstance(text, str):
+                        block["text"] = f"{block.get('text', '')}{text}"
+                elif delta_type == "thinking_delta":
+                    thinking = delta.get("thinking") or delta.get("text")
+                    if isinstance(thinking, str):
+                        block["type"] = "thinking"
+                        block["thinking"] = f"{block.get('thinking', '')}{thinking}"
+                elif delta_type == "signature_delta":
+                    signature = delta.get("signature")
+                    if isinstance(signature, str):
+                        block["signature"] = f"{block.get('signature', '')}{signature}"
+                elif delta_type == "input_json_delta":
+                    fragment = delta.get("partial_json")
+                    if isinstance(fragment, str):
+                        input_buffers[index] = input_buffers.get(index, "") + fragment
+                        parsed = _safe_json_loads(input_buffers[index])
+                        if isinstance(parsed, (dict, list)):
+                            block["input"] = parsed
+                continue
+            if event_type == "content_block_stop":
+                continue
+            if event_type == "message_delta":
+                delta = event.get("delta")
+                if isinstance(delta, dict):
+                    stop_reason = delta.get("stop_reason")
+                    if isinstance(stop_reason, str) and stop_reason:
+                        response["stop_reason"] = stop_reason
+                    if "usage" in delta and isinstance(delta["usage"], dict):
+                        usage.update(delta["usage"])
+                continue
+
+        if blocks_by_index:
+            for index in sorted(blocks_by_index.keys()):
+                block = blocks_by_index[index]
+                if block.get("type") == "tool_use" and "input" not in block:
+                    raw_input = input_buffers.get(index)
+                    if isinstance(raw_input, str) and raw_input.strip():
+                        parsed = _safe_json_loads(raw_input)
+                        if parsed is not None:
+                            block["input"] = parsed
+                content_blocks.append(block)
+        if usage:
+            response["usage"] = usage
+        if not content_blocks and not response.get("model"):
+            return None
+        return response
+
+    def _openai_response_from_sse(
+        self,
+        payload: str,
+        requested_model: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        response_id: Optional[str] = None
+        model: Optional[str] = None
+        created: Optional[int] = None
+        finish_reason: Optional[str] = None
+        usage: Optional[Dict[str, Any]] = None
+
+        message: Dict[str, Any] = {"role": "assistant", "content": ""}
+        tool_calls_map: Dict[int, Dict[str, Any]] = {}
+        reasoning_content = ""
+
+        for raw_line in payload.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            event = _safe_json_loads(data)
+            if not isinstance(event, dict):
+                continue
+            if response_id is None:
+                value = event.get("id")
+                if isinstance(value, str) and value:
+                    response_id = value
+            if model is None:
+                value = event.get("model")
+                if isinstance(value, str) and value:
+                    model = value
+            if created is None:
+                value = event.get("created")
+                if isinstance(value, int):
+                    created = value
+            if isinstance(event.get("usage"), dict):
+                usage = event.get("usage")
+
+            choices = event.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice.get("finish_reason")
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+
+            if "role" in delta and isinstance(delta.get("role"), str):
+                message["role"] = delta["role"]
+            if "content" in delta and isinstance(delta.get("content"), str):
+                message["content"] = f"{message.get('content', '')}{delta['content']}"
+            if "reasoning_content" in delta and isinstance(delta.get("reasoning_content"), str):
+                reasoning_content += delta["reasoning_content"]
+
+            tool_calls = delta.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    index = tool_call.get("index")
+                    if not isinstance(index, int):
+                        index = len(tool_calls_map)
+                    entry = tool_calls_map.get(index)
+                    if entry is None:
+                        entry = {
+                            "id": str(tool_call.get("id", "")) or f"call_{uuid4().hex[:12]}",
+                            "type": str(tool_call.get("type", "function")) or "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                        tool_calls_map[index] = entry
+                    if tool_call.get("id"):
+                        entry["id"] = str(tool_call.get("id"))
+                    function = tool_call.get("function")
+                    if isinstance(function, dict):
+                        name = function.get("name")
+                        if isinstance(name, str) and name:
+                            entry["function"]["name"] += name
+                        arguments = function.get("arguments")
+                        if isinstance(arguments, str) and arguments:
+                            entry["function"]["arguments"] += arguments
+
+        if tool_calls_map:
+            message["tool_calls"] = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+
+        if not response_id and not model and not message.get("content") and not tool_calls_map:
+            return None
+
+        response: Dict[str, Any] = {
+            "id": response_id or f"chatcmpl-{uuid4().hex}",
+            "object": "chat.completion",
+            "model": model or requested_model or "unknown-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason or "stop",
+                }
+            ],
+        }
+        if created is not None:
+            response["created"] = created
+        if usage is not None:
+            response["usage"] = usage
+        return response
+
     def _post_json(
         self,
         url: str,
-        payload: dict[str, Any],
-        headers: dict[str, str],
+        payload: Dict[str, Any],
+        headers: Dict[str, str],
         timeout_seconds: int,
     ) -> UpstreamHTTPResult:
         body = json.dumps(payload).encode("utf-8")
@@ -726,163 +575,6 @@ class ProxyRuntime:
                 body=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
             )
 
-    def _anthropic_response_from_openai(
-        self,
-        openai_response: dict[str, Any],
-        requested_model: str | None,
-    ) -> dict[str, Any]:
-        choices = openai_response.get("choices", [])
-        content_blocks: list[dict[str, Any]] = []
-        stop_reason = "end_turn"
-        if choices and isinstance(choices[0], dict):
-            message = choices[0].get("message", {})
-            if isinstance(message, dict):
-                content = message.get("content")
-                if isinstance(content, str):
-                    if content:
-                        content_blocks.append({"type": "text", "text": content})
-                elif isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            text = item.get("text")
-                            if isinstance(text, str) and text:
-                                content_blocks.append({"type": "text", "text": text})
-
-                tool_calls = message.get("tool_calls")
-                if isinstance(tool_calls, list):
-                    for call in tool_calls:
-                        if not isinstance(call, dict):
-                            continue
-                        function = call.get("function")
-                        if not isinstance(function, dict):
-                            continue
-                        name = str(function.get("name", "")).strip()
-                        if not name:
-                            continue
-                        call_id = str(call.get("id", "")).strip() or f"toolu_{uuid4().hex[:12]}"
-                        raw_arguments = function.get("arguments", "{}")
-                        if isinstance(raw_arguments, str):
-                            parsed_arguments = _safe_json_loads(raw_arguments)
-                        else:
-                            parsed_arguments = raw_arguments
-                        if not isinstance(parsed_arguments, (dict, list)):
-                            parsed_arguments = {
-                                "value": parsed_arguments
-                                if parsed_arguments is not None
-                                else raw_arguments
-                            }
-                        content_blocks.append(
-                            {
-                                "type": "tool_use",
-                                "id": call_id,
-                                "name": name,
-                                "input": parsed_arguments,
-                            }
-                        )
-
-            finish_reason = choices[0].get("finish_reason")
-            if finish_reason == "length":
-                stop_reason = "max_tokens"
-            elif finish_reason == "tool_calls":
-                stop_reason = "tool_use"
-
-        usage = openai_response.get("usage", {})
-        input_tokens = int(usage.get("prompt_tokens", 0)) if isinstance(usage, dict) else 0
-        output_tokens = int(usage.get("completion_tokens", 0)) if isinstance(usage, dict) else 0
-
-        return {
-            "id": f"msg_{uuid4().hex}",
-            "type": "message",
-            "role": "assistant",
-            "model": requested_model or "unknown-model",
-            "content": content_blocks,
-            "stop_reason": stop_reason,
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            },
-        }
-
-    def _openai_response_from_anthropic(
-        self,
-        anthropic_response: dict[str, Any],
-        requested_model: str | None,
-    ) -> dict[str, Any]:
-        blocks = anthropic_response.get("content", [])
-        if not isinstance(blocks, list):
-            blocks = []
-
-        text_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            block_type = str(block.get("type", "")).strip()
-            if block_type == "text":
-                text = block.get("text")
-                if isinstance(text, str) and text:
-                    text_parts.append(text)
-                continue
-            if block_type != "tool_use":
-                continue
-            name = str(block.get("name", "")).strip()
-            if not name:
-                continue
-            call_id = str(block.get("id", "")).strip() or f"call_{uuid4().hex[:12]}"
-            raw_input = block.get("input", {})
-            if not isinstance(raw_input, (dict, list)):
-                raw_input = {"value": raw_input}
-            tool_calls.append(
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": json.dumps(raw_input, ensure_ascii=False),
-                    },
-                }
-            )
-
-        stop_reason = anthropic_response.get("stop_reason")
-        finish_reason = "stop"
-        if stop_reason == "max_tokens":
-            finish_reason = "length"
-        elif stop_reason == "tool_use":
-            finish_reason = "tool_calls"
-
-        usage = anthropic_response.get("usage", {})
-        prompt_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
-        completion_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
-
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": "\n".join(text_parts) if text_parts else "",
-        }
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-
-        return {
-            "id": anthropic_response.get("id", f"chatcmpl-{uuid4().hex}"),
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": requested_model
-            or str(anthropic_response.get("model", "")).strip()
-            or "unknown-model",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finish_reason,
-                }
-            ],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-        }
-
     def _error_response(self, status_code: int, error_type: str, message: str) -> ProxyResponse:
         return ProxyResponse(
             status_code=status_code,
@@ -899,7 +591,7 @@ class ProxyRuntime:
         self,
         token: str,
         requested_model: str,
-    ) -> LLMProxyRoute | None:
+    ) -> Optional[LLMProxyRoute]:
         try:
             route = self.routing.match(requested_model)
         except Exception as exc:
@@ -928,8 +620,9 @@ class ProxyRuntime:
         self,
         token: str,
         route: LLMProxyRoute,
-        body: dict[str, Any],
+        body: Dict[str, Any],
     ) -> ProxyResponse:
+        request_log = dict(body)
         upstream_payload = dict(body)
         upstream_payload["model"] = route.upstream_model
         upstream_url = _join_url(route.upstream_base_url, "/v1/messages")
@@ -937,14 +630,6 @@ class ProxyRuntime:
             "x-api-key": route.upstream_api_key,
             "anthropic-version": "2023-06-01",
         }
-        qa_stamp = self._log_upstream_query(
-            token=token,
-            route=route,
-            downstream_protocol="anthropic",
-            upstream_url=upstream_url,
-            upstream_headers=upstream_headers,
-            upstream_payload=upstream_payload,
-        )
 
         upstream_result = self._post_json(
             url=upstream_url,
@@ -956,13 +641,6 @@ class ProxyRuntime:
         stream_requested = body.get("stream") is True
         if upstream_result.status_code >= 400:
             decoded = upstream_result.body.decode("utf-8", errors="replace")
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="anthropic",
-                upstream_result=upstream_result,
-            )
             self.record_event(
                 token=token,
                 event_type="upstream_error",
@@ -990,164 +668,39 @@ class ProxyRuntime:
         )
 
         if stream_requested and "text/event-stream" in upstream_result.content_type.lower():
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="anthropic",
-                upstream_result=upstream_result,
-            )
+            sse_payload = upstream_result.body.decode("utf-8", errors="replace")
+            downstream_log = self._anthropic_response_from_sse(sse_payload)
+            if downstream_log is not None:
+                self._log_downstream_qa(
+                    token=token,
+                    request_payload=request_log,
+                    response_payload=downstream_log,
+                )
             return ProxyResponse(
                 status_code=upstream_result.status_code,
-                payload=upstream_result.body.decode("utf-8", errors="replace"),
+                payload=sse_payload,
                 mode="sse_raw",
             )
 
         parsed = self._parse_json_body(upstream_result)
         if parsed is None:
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="anthropic",
-                upstream_result=upstream_result,
-            )
             return self._error_response(
                 status_code=502,
                 error_type="invalid_upstream_response",
                 message="Anthropic upstream returned non-JSON response",
             )
-        self._log_upstream_answer(
-            token=token,
-            stamp=qa_stamp,
-            route=route,
-            downstream_protocol="anthropic",
-            upstream_result=upstream_result,
-            upstream_json=parsed,
-            downstream_payload=parsed,
-        )
+        if isinstance(parsed, dict):
+            self._log_downstream_qa(
+                token=token,
+                request_payload=request_log,
+                response_payload=parsed,
+            )
         return ProxyResponse(status_code=upstream_result.status_code, payload=parsed, mode="json")
-
-    def _process_anthropic_to_openai(
-        self,
-        token: str,
-        route: LLMProxyRoute,
-        body: dict[str, Any],
-    ) -> ProxyResponse:
-        requested_model = body.get("model")
-        openai_payload: dict[str, Any] = {
-            "model": route.upstream_model,
-            "messages": _anthropic_messages_to_openai(body),
-            "max_tokens": int(body.get("max_tokens", 1024)),
-        }
-        if "temperature" in body:
-            openai_payload["temperature"] = body["temperature"]
-        if "top_p" in body:
-            openai_payload["top_p"] = body["top_p"]
-        stop_sequences = body.get("stop_sequences")
-        if stop_sequences:
-            openai_payload["stop"] = stop_sequences
-        tools = _anthropic_tools_to_openai(body.get("tools"))
-        if tools:
-            openai_payload["tools"] = tools
-            tool_choice = _anthropic_tool_choice_to_openai(body.get("tool_choice"))
-            if tool_choice is not None:
-                openai_payload["tool_choice"] = tool_choice
-        # DeepSeek reasoner requires reasoning_content in assistant/tool_call turns.
-        self._inject_reasoning_content(token, openai_payload["messages"])
-
-        upstream_url = _join_url(route.upstream_base_url, "/chat/completions")
-        upstream_headers = {"Authorization": f"Bearer {route.upstream_api_key}"}
-        qa_stamp = self._log_upstream_query(
-            token=token,
-            route=route,
-            downstream_protocol="anthropic",
-            upstream_url=upstream_url,
-            upstream_headers=upstream_headers,
-            upstream_payload=openai_payload,
-        )
-
-        upstream_result = self._post_json(
-            url=upstream_url,
-            payload=openai_payload,
-            headers=upstream_headers,
-            timeout_seconds=route.timeout_seconds,
-        )
-        upstream_json = self._parse_json_body(upstream_result)
-        if upstream_json is None:
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="anthropic",
-                upstream_result=upstream_result,
-            )
-            decoded = upstream_result.body.decode("utf-8", errors="replace")
-            return self._error_response(
-                status_code=502,
-                error_type="invalid_upstream_response",
-                message=decoded,
-            )
-
-        if upstream_result.status_code >= 400:
-            self.record_event(
-                token=token,
-                event_type="upstream_error",
-                payload={
-                    "status_code": upstream_result.status_code,
-                    "upstream_provider": route.upstream_provider,
-                    "error": upstream_json,
-                },
-            )
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="anthropic",
-                upstream_result=upstream_result,
-                upstream_json=upstream_json,
-            )
-            return self._error_response(
-                status_code=upstream_result.status_code,
-                error_type="upstream_error",
-                message=json.dumps(upstream_json, ensure_ascii=True),
-            )
-
-        anthropic_response = self._anthropic_response_from_openai(
-            openai_response=upstream_json,
-            requested_model=requested_model if isinstance(requested_model, str) else None,
-        )
-        self._remember_reasoning_for_tool_calls(token=token, openai_response=upstream_json)
-        self.record_event(
-            token=token,
-            event_type="anthropic_converted_response",
-            payload={
-                "route_name": route.name,
-                "status_code": upstream_result.status_code,
-                "output_tokens": anthropic_response["usage"]["output_tokens"],
-            },
-        )
-        self._log_upstream_answer(
-            token=token,
-            stamp=qa_stamp,
-            route=route,
-            downstream_protocol="anthropic",
-            upstream_result=upstream_result,
-            upstream_json=upstream_json,
-            downstream_payload=anthropic_response,
-        )
-        if body.get("stream") is True:
-            return ProxyResponse(
-                status_code=200,
-                payload=anthropic_response,
-                mode="sse_synth",
-            )
-        return ProxyResponse(status_code=200, payload=anthropic_response, mode="json")
 
     def process_anthropic_messages(
         self,
         token: str,
-        body: dict[str, Any],
+        body: Dict[str, Any],
     ) -> ProxyResponse:
         requested_model = str(body.get("model", "")).strip()
         if not requested_model:
@@ -1180,14 +733,21 @@ class ProxyRuntime:
                 message=f"No route for anthropic model: {requested_model}",
             )
 
-        if route.upstream_provider == "anthropic":
-            return self._process_anthropic_passthrough(token=token, route=route, body=body)
-        return self._process_anthropic_to_openai(token=token, route=route, body=body)
+        if route.upstream_provider != "anthropic":
+            return self._error_response(
+                status_code=400,
+                error_type="provider_mismatch",
+                message=(
+                    "Downstream request is anthropic, but route upstream_provider is "
+                    f"{route.upstream_provider}. Configure matching provider in task yaml."
+                ),
+            )
+        return self._process_anthropic_passthrough(token=token, route=route, body=body)
 
     def process_openai_chat_completions(
         self,
         token: str,
-        body: dict[str, Any],
+        body: Dict[str, Any],
     ) -> ProxyResponse:
         requested_model = str(body.get("model", "")).strip()
         if not requested_model:
@@ -1208,139 +768,65 @@ class ProxyRuntime:
                 message=f"No route for openai model: {requested_model}",
             )
         if route.upstream_provider == "openai":
+            request_log = dict(body)
             payload = dict(body)
             payload["model"] = route.upstream_model
             if isinstance(payload.get("messages"), list):
                 self._inject_reasoning_content(token, payload["messages"])
             upstream_url = _join_url(route.upstream_base_url, "/chat/completions")
             upstream_headers = {"Authorization": f"Bearer {route.upstream_api_key}"}
-            qa_stamp = self._log_upstream_query(
-                token=token,
-                route=route,
-                downstream_protocol="openai",
-                upstream_url=upstream_url,
-                upstream_headers=upstream_headers,
-                upstream_payload=payload,
-            )
             upstream_result = self._post_json(
                 url=upstream_url,
                 payload=payload,
                 headers=upstream_headers,
                 timeout_seconds=route.timeout_seconds,
             )
+            stream_requested = body.get("stream") is True
+            if stream_requested and "text/event-stream" in upstream_result.content_type.lower():
+                sse_payload = upstream_result.body.decode("utf-8", errors="replace")
+                downstream_log = self._openai_response_from_sse(
+                    payload=sse_payload,
+                    requested_model=requested_model,
+                )
+                if downstream_log is not None:
+                    self._log_downstream_qa(
+                        token=token,
+                        request_payload=request_log,
+                        response_payload=downstream_log,
+                    )
+                return ProxyResponse(
+                    status_code=upstream_result.status_code,
+                    payload=sse_payload,
+                    mode="sse_raw",
+                )
             upstream_json = self._parse_json_body(upstream_result)
             if upstream_json is None:
-                self._log_upstream_answer(
-                    token=token,
-                    stamp=qa_stamp,
-                    route=route,
-                    downstream_protocol="openai",
-                    upstream_result=upstream_result,
-                )
                 decoded = upstream_result.body.decode("utf-8", errors="replace")
                 return self._error_response(
                     status_code=502,
                     error_type="invalid_upstream_response",
                     message=decoded,
                 )
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="openai",
-                upstream_result=upstream_result,
-                upstream_json=upstream_json,
-                downstream_payload=upstream_json,
-            )
+            if upstream_result.status_code >= 400:
+                return ProxyResponse(
+                    status_code=upstream_result.status_code,
+                    payload=upstream_json,
+                )
             self._remember_reasoning_for_tool_calls(token=token, openai_response=upstream_json)
+            self._log_downstream_qa(
+                token=token,
+                request_payload=request_log,
+                response_payload=upstream_json,
+            )
             return ProxyResponse(status_code=upstream_result.status_code, payload=upstream_json)
-
-        anthropic_messages, anthropic_system = _openai_messages_to_anthropic(body.get("messages"))
-        anthropic_payload: dict[str, Any] = {
-            "model": route.upstream_model,
-            "messages": anthropic_messages,
-            "max_tokens": int(
-                body.get("max_tokens", body.get("max_completion_tokens", 1024))
+        return self._error_response(
+            status_code=400,
+            error_type="provider_mismatch",
+            message=(
+                "Downstream request is openai, but route upstream_provider is "
+                f"{route.upstream_provider}. Configure matching provider in task yaml."
             ),
-        }
-        if anthropic_system is not None:
-            anthropic_payload["system"] = anthropic_system
-        if "temperature" in body:
-            anthropic_payload["temperature"] = body["temperature"]
-        if "top_p" in body:
-            anthropic_payload["top_p"] = body["top_p"]
-        anthropic_tools = _openai_tools_to_anthropic(body.get("tools"))
-        if anthropic_tools:
-            anthropic_payload["tools"] = anthropic_tools
-            tool_choice = _openai_tool_choice_to_anthropic(body.get("tool_choice"))
-            if tool_choice is not None:
-                anthropic_payload["tool_choice"] = tool_choice
-
-        upstream_url = _join_url(route.upstream_base_url, "/v1/messages")
-        upstream_headers = {
-            "x-api-key": route.upstream_api_key,
-            "anthropic-version": "2023-06-01",
-        }
-        qa_stamp = self._log_upstream_query(
-            token=token,
-            route=route,
-            downstream_protocol="openai",
-            upstream_url=upstream_url,
-            upstream_headers=upstream_headers,
-            upstream_payload=anthropic_payload,
         )
-
-        upstream_result = self._post_json(
-            url=upstream_url,
-            payload=anthropic_payload,
-            headers=upstream_headers,
-            timeout_seconds=route.timeout_seconds,
-        )
-        anthropic_json = self._parse_json_body(upstream_result)
-        if anthropic_json is None:
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="openai",
-                upstream_result=upstream_result,
-            )
-            decoded = upstream_result.body.decode("utf-8", errors="replace")
-            return self._error_response(
-                status_code=502,
-                error_type="invalid_upstream_response",
-                message=decoded,
-            )
-
-        if upstream_result.status_code >= 400:
-            self._log_upstream_answer(
-                token=token,
-                stamp=qa_stamp,
-                route=route,
-                downstream_protocol="openai",
-                upstream_result=upstream_result,
-                upstream_json=anthropic_json,
-            )
-            return self._error_response(
-                status_code=upstream_result.status_code,
-                error_type="upstream_error",
-                message=json.dumps(anthropic_json, ensure_ascii=True),
-            )
-
-        openai_response = self._openai_response_from_anthropic(
-            anthropic_response=anthropic_json,
-            requested_model=requested_model,
-        )
-        self._log_upstream_answer(
-            token=token,
-            stamp=qa_stamp,
-            route=route,
-            downstream_protocol="openai",
-            upstream_result=upstream_result,
-            upstream_json=anthropic_json,
-            downstream_payload=openai_response,
-        )
-        return ProxyResponse(status_code=200, payload=openai_response)
 
 
 class ProxyRequestHandler(BaseHTTPRequestHandler):
@@ -1351,7 +837,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+    def _send_json(self, status_code: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
@@ -1369,7 +855,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_sse_message(self, payload: dict[str, Any]) -> None:
+    def _send_sse_message(self, payload: Dict[str, Any]) -> None:
         """Send a synthesized Anthropic-compatible SSE stream."""
         content_blocks = payload.get("content", [])
         if not isinstance(content_blocks, list):
@@ -1392,7 +878,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
         stop_reason = payload.get("stop_reason", "end_turn")
 
-        events: list[tuple[str, dict[str, Any]]] = [
+        events: List[Tuple[str, Dict[str, Any]]] = [
             ("message_start", {"type": "message_start", "message": message_obj})
         ]
 
@@ -1493,7 +979,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             ]
         )
 
-        chunks: list[str] = []
+        chunks: List[str] = []
         for event, data in events:
             chunks.append(f"event: {event}\n")
             chunks.append(f"data: {json.dumps(data, ensure_ascii=True)}\n\n")
@@ -1507,7 +993,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json(self) -> dict[str, Any]:
+    def _read_json(self) -> Dict[str, Any]:
         length_raw = self.headers.get("Content-Length", "0")
         try:
             length = int(length_raw)
@@ -1521,7 +1007,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Request body must be JSON object")
         return data
 
-    def _extract_token(self, body: dict[str, Any] | None = None) -> str:
+    def _extract_token(self, body: Optional[Dict[str, Any]] = None) -> str:
         authorization = self.headers.get("Authorization")
         if authorization and authorization.lower().startswith("bearer "):
             token = authorization.split(" ", 1)[1].strip()
@@ -1618,7 +1104,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             return
 
         token = self._extract_token(body=body)
-        if path in {"/v1/messages", "/v1/message"}:
+        if path in {"/v1/messages", "/v1/message", "/messages", "/message"}:
             response = self.server.runtime.process_anthropic_messages(token=token, body=body)
             if response.mode == "sse_raw" and isinstance(response.payload, str):
                 self._send_sse_raw(response.payload)
@@ -1630,12 +1116,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "invalid_proxy_response"})
             return
 
-        if path == "/v1/chat/completions":
+        if path in {"/v1/chat/completions", "/chat/completions"}:
             response = self.server.runtime.process_openai_chat_completions(
                 token=token,
                 body=body,
             )
-            if isinstance(response.payload, dict):
+            if response.mode == "sse_raw" and isinstance(response.payload, str):
+                self._send_sse_raw(response.payload)
+            elif isinstance(response.payload, dict):
                 self._send_json(response.status_code, response.payload)
             else:
                 self._send_json(500, {"error": "invalid_proxy_response"})
@@ -1647,7 +1135,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 class ProxyHTTPServer(ThreadingHTTPServer):
     """HTTP server type holding shared proxy runtime."""
 
-    def __init__(self, server_address: tuple[str, int], runtime: ProxyRuntime):
+    def __init__(self, server_address: Tuple[str, int], runtime: ProxyRuntime):
         super().__init__(server_address=server_address, RequestHandlerClass=ProxyRequestHandler)
         self.runtime = runtime
 
@@ -1658,7 +1146,7 @@ class LLMProxyServer:
     def __init__(self, routing: LLMProxyRoutingConfig, proxy: ProxyConfig):
         self.runtime = ProxyRuntime(routing=routing, proxy=proxy)
         self._httpd = ProxyHTTPServer((proxy.host, proxy.port), runtime=self.runtime)
-        self._thread: threading.Thread | None = None
+        self._thread: Optional[threading.Thread] = None
 
     @property
     def base_url(self) -> str:
@@ -1670,12 +1158,12 @@ class LLMProxyServer:
     def register_session(
         self,
         token: str,
-        sandbox_id: str | None,
-        task_name: str | None,
+        sandbox_id: Optional[str],
+        task_name: Optional[str],
     ) -> None:
         self.runtime.register_session(token=token, sandbox_id=sandbox_id, task_name=task_name)
 
-    def record_event(self, token: str, event_type: str, payload: dict[str, Any]) -> None:
+    def record_event(self, token: str, event_type: str, payload: Dict[str, Any]) -> None:
         self.runtime.record_event(token=token, event_type=event_type, payload=payload)
 
     def start(self) -> None:

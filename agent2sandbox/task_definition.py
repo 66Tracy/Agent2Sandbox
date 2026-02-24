@@ -6,7 +6,7 @@ import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass(frozen=True)
@@ -21,27 +21,27 @@ class LLMTaskConfig:
 class TaskDefinition:
     name: str
     image: str
-    sandbox_entrypoint: list[str]
-    task_command: list[str]
+    sandbox_entrypoint: List[str]
+    task_command: List[str]
     llm: LLMTaskConfig
-    artifacts: list[str] = field(default_factory=list)
-    goal: str | None = None
-    finish_condition: dict[str, Any] | None = None
-    env: dict[str, str] = field(default_factory=dict)
+    artifacts: List[str] = field(default_factory=list)
+    goal: Optional[str] = None
+    finish_condition: Optional[Dict[str, Any]] = None
+    env: Dict[str, str] = field(default_factory=dict)
 
     def command_as_shell(self) -> str:
         """Convert list command tokens into a shell-safe command string."""
         return shlex.join(self.task_command)
 
 
-def _require(mapping: dict[str, Any], key: str) -> Any:
+def _require(mapping: Dict[str, Any], key: str) -> Any:
     value = mapping.get(key)
     if value is None:
         raise ValueError(f"Missing required task field: {key}")
     return value
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
+def _load_yaml(path: Path) -> Dict[str, Any]:
     try:
         import yaml
     except ImportError as exc:
@@ -55,7 +55,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _load_json(path: Path) -> dict[str, Any]:
+def _load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
@@ -63,7 +63,7 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_task_definition(path: str | Path) -> TaskDefinition:
+def load_task_definition(path: Union[str, Path]) -> TaskDefinition:
     """Load a task definition from JSON or YAML."""
 
     task_path = Path(path)
@@ -89,12 +89,12 @@ def load_task_definition(path: str | Path) -> TaskDefinition:
     entrypoint = _require(data, "sandbox_entrypoint")
     command = _require(data, "task_command")
     if not isinstance(entrypoint, list) or not all(isinstance(i, str) for i in entrypoint):
-        raise ValueError("`sandbox_entrypoint` must be a list[str]")
+        raise ValueError("`sandbox_entrypoint` must be a List[str]")
     if not isinstance(command, list) or not all(isinstance(i, str) for i in command):
-        raise ValueError("`task_command` must be a list[str]")
+        raise ValueError("`task_command` must be a List[str]")
 
     artifacts_raw = data.get("artifacts", [])
-    artifacts: list[str] = []
+    artifacts: List[str] = []
     if isinstance(artifacts_raw, list):
         for item in artifacts_raw:
             if isinstance(item, str):
@@ -122,4 +122,3 @@ def load_task_definition(path: str | Path) -> TaskDefinition:
         finish_condition=data.get("finish_condition"),
         env=env,
     )
-

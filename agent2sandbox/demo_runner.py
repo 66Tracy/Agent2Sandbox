@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
 from agent2sandbox.llm_proxy import LLMProxyServer
@@ -22,7 +22,7 @@ from agent2sandbox.task_definition import TaskDefinition, load_task_definition
 def _stream_to_text(stream: Any) -> str:
     if not stream:
         return ""
-    lines: list[str] = []
+    lines: List[str] = []
     for item in stream:
         text = getattr(item, "text", None)
         if isinstance(text, str):
@@ -48,9 +48,9 @@ class DemoRunResult:
     command: str
     stdout: str
     stderr: str
-    error: str | None
-    artifacts: dict[str, str]
-    trajectory_file: Path
+    error: Optional[str]
+    artifacts: Dict[str, str]
+    trajectory_dir: Path
 
     @property
     def success(self) -> bool:
@@ -62,11 +62,11 @@ class DemoRunner:
 
     def __init__(
         self,
-        proxy_cfg_file: str | Path = "config/llmproxy-cfg.yaml",
-        sandbox_cfg_file: str | Path = "config/sandbox-server-cfg.yaml",
+        proxy_cfg_file: Union[str, Path] = "config/llmproxy-cfg.yaml",
+        sandbox_cfg_file: Union[str, Path] = "config/sandbox-server-cfg.yaml",
         proxy_host: str = "127.0.0.1",
         proxy_port: int = 18080,
-        trajectory_dir: str | Path = "logs/trajectory",
+        trajectory_dir: Union[str, Path] = "logs/trajectory",
     ):
         self.proxy_cfg_file = Path(proxy_cfg_file)
         self.sandbox_cfg_file = Path(sandbox_cfg_file)
@@ -74,7 +74,7 @@ class DemoRunner:
         self.proxy_port = proxy_port
         self.trajectory_dir = Path(trajectory_dir)
 
-    async def run_task(self, task_file: str | Path) -> DemoRunResult:
+    async def run_task(self, task_file: Union[str, Path]) -> DemoRunResult:
         # Lazy imports keep this module importable even without opensandbox installed.
         try:
             from opensandbox import Sandbox
@@ -113,7 +113,7 @@ class DemoRunner:
         )
 
         command = task.command_as_shell()
-        artifacts: dict[str, str] = {}
+        artifacts: Dict[str, str] = {}
         sandbox_id = "unknown"
 
         with proxy_server.running():
@@ -185,7 +185,7 @@ class DemoRunner:
             stderr=stderr,
             error=error_text,
             artifacts=artifacts,
-            trajectory_file=proxy_server.trajectory_path(session_token),
+            trajectory_dir=proxy_server.trajectory_path(session_token),
         )
 
 
@@ -197,7 +197,7 @@ async def _amain(task_file: str, runner: DemoRunner) -> int:
     print(f"Task: {result.task_name}")
     print(f"Sandbox ID: {result.sandbox_id}")
     print(f"Session token: {result.session_token}")
-    print(f"Trajectory: {result.trajectory_file}")
+    print(f"Trajectory: {result.trajectory_dir}")
     print(f"Command: {result.command}")
     print(f"Error: {result.error or 'None'}")
     print("\n[stdout]")

@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -25,7 +25,7 @@ from agent2sandbox.llm_proxy import LLMProxyServer
 from agent2sandbox.settings import ProxyConfig, load_llmproxy_routing_config
 
 
-def _http_get_json(url: str, timeout_seconds: int = 5) -> dict[str, Any]:
+def _http_get_json(url: str, timeout_seconds: int = 5) -> Dict[str, Any]:
     request = urllib.request.Request(url=url, method="GET")
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
