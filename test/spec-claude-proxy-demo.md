@@ -6,7 +6,7 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 ## Scope
 - In scope:
   - local proxy listening endpoint
-  - centralized model routing settings from `config/llmproxy-cfg.yaml`
+  - proxy server + routing settings from `config/llmproxy-cfg.yaml`
   - sandbox command execution in `code-interpreter:v1.0.1`
   - per-session trajectory QA file output
 - Out of scope:
@@ -26,8 +26,8 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 - Entrypoint: `/opt/opensandbox/code-interpreter.sh`
 
 ### Steps
-1. Start local `LLM-Proxy` at `127.0.0.1:18080`.
-2. Read routing config from `config/llmproxy-cfg.yaml` and resolve `ENV:*` refs from system environment variables.
+1. Start local `LLM-Proxy` at host/port from `config/llmproxy-cfg.yaml`.
+2. Read proxy config from `config/llmproxy-cfg.yaml` and resolve `ENV:*` refs from system environment variables.
 3. Read sandbox server config from `config/sandbox-server-cfg.yaml`.
 4. Create sandbox and inject:
    - `ANTHROPIC_BASE_URL=http://127.0.0.1:18080`

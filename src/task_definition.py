@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from utils import _require
+
 
 @dataclass(frozen=True)
 class LLMTaskConfig:
@@ -32,13 +34,6 @@ class TaskDefinition:
     def command_as_shell(self) -> str:
         """Convert list command tokens into a shell-safe command string."""
         return shlex.join(self.task_command)
-
-
-def _require(mapping: Dict[str, Any], key: str) -> Any:
-    value = mapping.get(key)
-    if value is None:
-        raise ValueError(f"Missing required task field: {key}")
-    return value
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:

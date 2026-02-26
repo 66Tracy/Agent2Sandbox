@@ -19,10 +19,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
-from agent2sandbox.llm_proxy import LLMProxyServer
-from agent2sandbox.settings import ProxyConfig, load_llmproxy_routing_config
+from llm_proxy import (
+    LLMProxyConfig,
+    LLMProxyServer,
+    LLMProxyServerConfig,
+    load_llmproxy_config,
+)
 
 
 def _http_get_json(url: str, timeout_seconds: int = 5) -> Dict[str, Any]:
@@ -39,22 +44,6 @@ def _parse_args() -> argparse.Namespace:
         help="Path to llmproxy config yaml",
     )
     parser.add_argument(
-        "--host",
-        default=os.getenv("A2S_PROXY_HOST", "127.0.0.1"),
-        help="Proxy listen host",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.getenv("A2S_PROXY_PORT", "18080")),
-        help="Proxy listen port",
-    )
-    parser.add_argument(
-        "--log-dir",
-        default=os.getenv("A2S_TRAJECTORY_DIR", "logs/trajectory"),
-        help="Trajectory log directory",
-    )
-    parser.add_argument(
         "--duration",
         type=int,
         default=0,
@@ -65,23 +54,22 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    routing = load_llmproxy_routing_config(cfg_file=args.cfg_file)
-    proxy = ProxyConfig(host=args.host, port=args.port, log_dir=Path(args.log_dir))
-    server = LLMProxyServer(routing=routing, proxy=proxy)
+    config = load_llmproxy_config(cfg_file=args.cfg_file)
+    server = LLMProxyServer(config=config)
 
     print("=" * 72)
     print("Test 3: Standalone LLM-Proxy")
     print("=" * 72)
-    print(f"Proxy listen: {proxy.base_url}")
+    print(f"Proxy listen: {server.base_url}")
     print(f"Proxy cfg: {args.cfg_file}")
-    print(f"Trajectory dir: {proxy.log_dir}")
-    print(f"Routes loaded: {len(routing.routes)}")
+    print(f"Trajectory dir: {config.server_config.log_dir}")
+    print(f"Routes loaded: {len(config.routing_config.routes)}")
     print("Press Ctrl+C to stop.")
 
     with server.running():
         try:
-            health = _http_get_json(f"{proxy.base_url}/healthz")
-            routes = _http_get_json(f"{proxy.base_url}/routes")
+            health = _http_get_json(f"{server.base_url}/healthz")
+            routes = _http_get_json(f"{server.base_url}/routes")
             print(f"\nHealth: {health}")
             print("Routes:")
             for route in routes.get("routes", []):

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import threading
-import urllib.error
 import urllib.parse
-import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,12 +15,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
-from agent2sandbox.settings import (
-    LLMProxyRoute,
-    LLMProxyRoutingConfig,
-    ProxyConfig,
-    load_llmproxy_routing_config,
+import httpx
+
+from utils import (
+    _build_missing_config_error,
+    _load_yaml_object,
+    _require,
+    _resolve_ref,
 )
+
+LOGGER = logging.getLogger("llm_proxy")
 
 
 def _utc_now() -> str:
@@ -62,6 +65,193 @@ def _join_url(base_url: str, suffix: str) -> str:
     if base.endswith(suffix):
         return base
     return f"{base}{suffix}"
+
+
+def _parse_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n"}:
+        return False
+    raise ValueError(f"Expected boolean value, got: {value!r}")
+
+
+@dataclass(frozen=True)
+class LLMProxyServerConfig:
+    """Local proxy listen configuration."""
+
+    host: str = "127.0.0.1"
+    port: int = 18080
+    log_dir: Path = Path("logs/trajectory")
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
+@dataclass(frozen=True)
+class LLMProxyRoute:
+    """Route describing downstream model key -> upstream model endpoint mapping."""
+
+    name: str
+    request_model: str
+    upstream_provider: str
+    upstream_base_url: str
+    upstream_model: str
+    upstream_api_key: str
+    timeout_seconds: int = 120
+    verify_ssl: bool = True
+
+
+@dataclass(frozen=True)
+class LLMProxyRoutingConfig:
+    """Model routing configuration loaded from `config/llmproxy-cfg.yaml`."""
+
+    routes: List[LLMProxyRoute]
+    default_timeout_seconds: int = 120
+
+    def match(self, requested_model: str) -> LLMProxyRoute:
+        model = requested_model.strip()
+        for route in self.routes:
+            if route.name == model:
+                return route
+        for route in self.routes:
+            if route.request_model == model:
+                return route
+        for route in self.routes:
+            if route.name == "*" or route.request_model == "*":
+                return route
+        raise ValueError(f"No LLM proxy route found for model={requested_model}")
+
+
+@dataclass(frozen=True)
+class LLMProxyConfig:
+    """LLM proxy configuration wrapper (routing + server)."""
+
+    routing_config: LLMProxyRoutingConfig
+    server_config: LLMProxyServerConfig
+
+    @property
+    def routing(self) -> LLMProxyRoutingConfig:
+        return self.routing_config
+
+    @property
+    def proxy(self) -> LLMProxyServerConfig:
+        return self.server_config
+
+
+def load_llmproxy_config(
+    cfg_file: Union[str, Path] = "config/llmproxy-cfg.yaml",
+) -> LLMProxyConfig:
+    """Load and validate LLM proxy routing + server configuration."""
+
+    cfg_path = Path(cfg_file)
+    if not cfg_path.exists():
+        raise _build_missing_config_error(cfg_path, "upstream routing")
+
+    data = _load_yaml_object(cfg_path)
+
+    server_raw = data.get("server", {}) or {}
+    if not isinstance(server_raw, dict):
+        raise ValueError("`server` must be an object")
+
+    host_raw = _resolve_ref(server_raw.get("host", "127.0.0.1"))
+    host = host_raw or "127.0.0.1"
+
+    port_raw = server_raw.get("port", 18080)
+    if isinstance(port_raw, str):
+        port_raw = _resolve_ref(port_raw) or port_raw
+    port = int(port_raw)
+
+    log_dir_raw = _resolve_ref(server_raw.get("log_dir", "logs/trajectory"))
+    log_dir = Path(log_dir_raw or "logs/trajectory")
+
+    server_config = LLMProxyServerConfig(host=host, port=port, log_dir=log_dir)
+
+    defaults = data.get("defaults", {}) or {}
+    if not isinstance(defaults, dict):
+        raise ValueError("`defaults` must be an object")
+    default_timeout = int(defaults.get("timeout_seconds", 120))
+
+    raw_routes = _require(data, "routes")
+    if not isinstance(raw_routes, list) or not raw_routes:
+        raise ValueError("`routes` must be a non-empty list")
+
+    routes: List[LLMProxyRoute] = []
+    for idx, route_item in enumerate(raw_routes):
+        if not isinstance(route_item, dict):
+            raise ValueError(f"routes[{idx}] must be an object")
+
+        name = str(route_item.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"routes[{idx}] requires non-empty `name`")
+
+        request_model = route_item.get("model", name)
+
+        upstream = _require(route_item, "upstream")
+        if not isinstance(upstream, dict):
+            raise ValueError(f"routes[{idx}].upstream must be an object")
+
+        upstream_provider = str(_require(upstream, "provider")).strip().lower()
+        upstream_base_url = str(_require(upstream, "base_url")).strip()
+        upstream_model_raw = upstream.get("upstream_model_name", upstream.get("model"))
+        if upstream_model_raw is None:
+            raise ValueError(
+                f"routes[{idx}].upstream requires `upstream_model_name` or `model`"
+            )
+        upstream_model = str(upstream_model_raw).strip()
+        timeout_seconds = int(upstream.get("timeout_seconds", default_timeout))
+
+        if upstream_provider not in {"openai", "anthropic"}:
+            raise ValueError(
+                f"routes[{idx}].upstream.provider must be `openai` or `anthropic`"
+            )
+
+        api_key_ref = upstream.get("api_key_ref")
+        api_key_value = upstream.get("api_key")
+        resolved_key = _resolve_ref(
+            str(api_key_ref)
+            if api_key_ref is not None
+            else (str(api_key_value) if api_key_value is not None else None)
+        )
+        if not resolved_key:
+            raise ValueError(
+                f"routes[{idx}] requires upstream.api_key or upstream.api_key_ref (ENV:KEY)"
+            )
+
+        verify_ssl = _parse_bool(upstream.get("verify_ssl", upstream.get("verify", True)))
+
+        routes.append(
+            LLMProxyRoute(
+                name=name,
+                request_model=str(request_model).strip(),
+                upstream_provider=upstream_provider,
+                upstream_base_url=upstream_base_url,
+                upstream_model=upstream_model,
+                upstream_api_key=resolved_key,
+                timeout_seconds=timeout_seconds,
+                verify_ssl=verify_ssl,
+            )
+        )
+
+    routing_config = LLMProxyRoutingConfig(
+        routes=routes,
+        default_timeout_seconds=default_timeout,
+    )
+
+    return LLMProxyConfig(routing_config=routing_config, server_config=server_config)
+
+
+def load_llmproxy_routing_config(
+    cfg_file: Union[str, Path] = "config/llmproxy-cfg.yaml",
+) -> LLMProxyRoutingConfig:
+    """Backward-compatible routing-only loader."""
+
+    return load_llmproxy_config(cfg_file=cfg_file).routing_config
 
 
 @dataclass
@@ -137,7 +327,7 @@ class TrajectoryStore:
 class ProxyRuntime:
     """In-memory runtime state shared by all HTTP handlers."""
 
-    def __init__(self, routing: LLMProxyRoutingConfig, proxy: ProxyConfig):
+    def __init__(self, routing: LLMProxyRoutingConfig, proxy: LLMProxyServerConfig):
         self.routing = routing
         self.proxy = proxy
         self.store = TrajectoryStore(proxy.log_dir)
@@ -535,39 +725,26 @@ class ProxyRuntime:
         payload: Dict[str, Any],
         headers: Dict[str, str],
         timeout_seconds: int,
+        verify_ssl: bool,
     ) -> UpstreamHTTPResult:
-        body = json.dumps(payload).encode("utf-8")
-        merged_headers = {"Content-Type": "application/json"}
-        merged_headers.update(headers)
-
-        request = urllib.request.Request(
-            url=url,
-            data=body,
-            method="POST",
-            headers=merged_headers,
-        )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-                content_type = response.headers.get("Content-Type", "application/json")
-                return UpstreamHTTPResult(
-                    status_code=response.getcode(),
-                    content_type=content_type,
-                    body=response.read(),
+            with httpx.Client(timeout=timeout_seconds, verify=verify_ssl) as client:
+                response = client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
                 )
-        except urllib.error.HTTPError as exc:
-            content_type = exc.headers.get("Content-Type", "application/json")
+            content_type = response.headers.get("Content-Type", "application/json")
             return UpstreamHTTPResult(
-                status_code=exc.code,
+                status_code=response.status_code,
                 content_type=content_type,
-                body=exc.read(),
+                body=response.content,
             )
-        except urllib.error.URLError as exc:
+        except httpx.RequestError as exc:
+            LOGGER.error("upstream_request_failed", extra={"error": str(exc), "url": url})
             payload = {
                 "type": "error",
-                "error": {
-                    "type": "network_error",
-                    "message": str(exc),
-                },
+                "error": {"type": "network_error", "message": str(exc)},
             }
             return UpstreamHTTPResult(
                 status_code=502,
@@ -595,6 +772,10 @@ class ProxyRuntime:
         try:
             route = self.routing.match(requested_model)
         except Exception as exc:
+            LOGGER.warning(
+                "downstream_route_not_found",
+                extra={"requested_model": requested_model, "error": str(exc)},
+            )
             self.record_event(
                 token=token,
                 event_type="route_not_found",
@@ -636,11 +817,20 @@ class ProxyRuntime:
             payload=upstream_payload,
             headers=upstream_headers,
             timeout_seconds=route.timeout_seconds,
+            verify_ssl=route.verify_ssl,
         )
 
         stream_requested = body.get("stream") is True
         if upstream_result.status_code >= 400:
             decoded = upstream_result.body.decode("utf-8", errors="replace")
+            LOGGER.warning(
+                "upstream_error",
+                extra={
+                    "status_code": upstream_result.status_code,
+                    "provider": route.upstream_provider,
+                    "model": route.upstream_model,
+                },
+            )
             self.record_event(
                 token=token,
                 event_type="upstream_error",
@@ -704,6 +894,7 @@ class ProxyRuntime:
     ) -> ProxyResponse:
         requested_model = str(body.get("model", "")).strip()
         if not requested_model:
+            LOGGER.warning("downstream_bad_request", extra={"reason": "missing_model"})
             return self._error_response(
                 status_code=400,
                 error_type="bad_request",
@@ -727,6 +918,10 @@ class ProxyRuntime:
             requested_model=requested_model,
         )
         if route is None:
+            LOGGER.warning(
+                "downstream_route_not_found",
+                extra={"requested_model": requested_model, "provider": "anthropic"},
+            )
             return self._error_response(
                 status_code=404,
                 error_type="route_not_found",
@@ -734,6 +929,10 @@ class ProxyRuntime:
             )
 
         if route.upstream_provider != "anthropic":
+            LOGGER.warning(
+                "downstream_provider_mismatch",
+                extra={"requested_model": requested_model, "upstream_provider": route.upstream_provider},
+            )
             return self._error_response(
                 status_code=400,
                 error_type="provider_mismatch",
@@ -751,6 +950,7 @@ class ProxyRuntime:
     ) -> ProxyResponse:
         requested_model = str(body.get("model", "")).strip()
         if not requested_model:
+            LOGGER.warning("downstream_bad_request", extra={"reason": "missing_model"})
             return self._error_response(
                 status_code=400,
                 error_type="bad_request",
@@ -762,6 +962,10 @@ class ProxyRuntime:
             requested_model=requested_model,
         )
         if route is None:
+            LOGGER.warning(
+                "downstream_route_not_found",
+                extra={"requested_model": requested_model, "provider": "openai"},
+            )
             return self._error_response(
                 status_code=404,
                 error_type="route_not_found",
@@ -780,8 +984,18 @@ class ProxyRuntime:
                 payload=payload,
                 headers=upstream_headers,
                 timeout_seconds=route.timeout_seconds,
+                verify_ssl=route.verify_ssl,
             )
             stream_requested = body.get("stream") is True
+            if upstream_result.status_code >= 400:
+                LOGGER.warning(
+                    "upstream_error",
+                    extra={
+                        "status_code": upstream_result.status_code,
+                        "provider": route.upstream_provider,
+                        "model": route.upstream_model,
+                    },
+                )
             if stream_requested and "text/event-stream" in upstream_result.content_type.lower():
                 sse_payload = upstream_result.body.decode("utf-8", errors="replace")
                 downstream_log = self._openai_response_from_sse(
@@ -1059,6 +1273,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             body = self._read_json()
         except Exception as exc:
+            LOGGER.error(
+                "downstream_invalid_json",
+                extra={"path": path, "error": str(exc)},
+            )
             self._send_json(400, {"error": f"invalid_json: {exc}"})
             return
 
@@ -1143,9 +1361,14 @@ class ProxyHTTPServer(ThreadingHTTPServer):
 class LLMProxyServer:
     """Threaded local LLM proxy server with trajectory persistence."""
 
-    def __init__(self, routing: LLMProxyRoutingConfig, proxy: ProxyConfig):
-        self.runtime = ProxyRuntime(routing=routing, proxy=proxy)
-        self._httpd = ProxyHTTPServer((proxy.host, proxy.port), runtime=self.runtime)
+    def __init__(self, config: LLMProxyConfig):
+        self.runtime = ProxyRuntime(
+            routing=config.routing_config,
+            proxy=config.server_config,
+        )
+        self._httpd = ProxyHTTPServer(
+            (config.server_config.host, config.server_config.port), runtime=self.runtime
+        )
         self._thread: Optional[threading.Thread] = None
 
     @property
@@ -1192,25 +1415,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cfg-file",
         default="config/llmproxy-cfg.yaml",
-        help="Path to llmproxy routing config yaml",
-    )
-    parser.add_argument("--host", default="127.0.0.1", help="Proxy listen host")
-    parser.add_argument("--port", type=int, default=18080, help="Proxy listen port")
-    parser.add_argument(
-        "--log-dir",
-        default="logs/trajectory",
-        help="Directory for per-session trajectory files",
+        help="Path to llmproxy config yaml",
     )
     return parser.parse_args()
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     args = _parse_args()
-    routing = load_llmproxy_routing_config(cfg_file=args.cfg_file)
-    proxy = ProxyConfig(host=args.host, port=args.port, log_dir=Path(args.log_dir))
-    server = LLMProxyServer(routing=routing, proxy=proxy)
-    print(f"LLM proxy listening on {proxy.base_url}")
-    print(f"Routes loaded: {len(routing.routes)}")
+    config = load_llmproxy_config(cfg_file=args.cfg_file)
+    server = LLMProxyServer(config=config)
+    print(f"LLM proxy listening on {server.base_url}")
+    print(f"Routes loaded: {len(config.routing_config.routes)}")
     with server.running():
         try:
             threading.Event().wait()

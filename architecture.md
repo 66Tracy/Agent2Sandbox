@@ -71,7 +71,8 @@ artifacts:
 
 ## 6. 组件职责
 - **Task Runner/Launcher**：解析任务定义 → 创建 sandbox → 透传配置 → 启动 sandbox_entrypoint。
-- **LLM-Proxy**：OpenAI/Anthropic 协议透传，记录对话历史，未来可切换数据库。
+- **LLM-Proxy**：独立服务，OpenAI/Anthropic 协议透传，记录对话历史，未来可切换数据库。
+- **Sandbox Interaction**：仅负责 OpenSandbox 交互与任务执行，不依赖 LLM-Proxy。
 - **MCP 模块**：统一配置结构，后续落地 gRPC over HTTP/2。
 - **监控模块（占位）**：定义心跳/超时/状态检查接口。
 

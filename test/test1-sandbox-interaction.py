@@ -15,9 +15,10 @@ from opensandbox import Sandbox
 from opensandbox.config import ConnectionConfig
 from code_interpreter import CodeInterpreter, SupportedLanguage
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
-from agent2sandbox.settings import load_sandbox_server_config
+from sandbox_interactions import load_sandbox_server_config
 
 
 async def test_basic_sandbox_interaction() -> None:
