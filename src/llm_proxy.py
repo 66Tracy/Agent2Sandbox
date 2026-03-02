@@ -219,9 +219,7 @@ def load_llmproxy_config(
             else (str(api_key_value) if api_key_value is not None else None)
         )
         if not resolved_key:
-            raise ValueError(
-                f"routes[{idx}] requires upstream.api_key or upstream.api_key_ref (ENV:KEY)"
-            )
+            raise ValueError(f"routes[{idx}] requires upstream.api_key or upstream.api_key_ref")
 
         verify_ssl = _parse_bool(upstream.get("verify_ssl", upstream.get("verify", True)))
 
@@ -728,7 +726,11 @@ class ProxyRuntime:
         verify_ssl: bool,
     ) -> UpstreamHTTPResult:
         try:
-            with httpx.Client(timeout=timeout_seconds, verify=verify_ssl) as client:
+            with httpx.Client(
+                timeout=timeout_seconds,
+                verify=verify_ssl,
+                trust_env=True,
+            ) as client:
                 response = client.post(
                     url,
                     json=payload,

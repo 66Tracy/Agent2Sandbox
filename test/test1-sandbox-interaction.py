@@ -6,7 +6,6 @@ It is kept as a smoke test for Docker + OpenSandbox Server availability.
 """
 
 import asyncio
-import os
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -26,9 +25,7 @@ async def test_basic_sandbox_interaction() -> None:
     print("Test: Basic Sandbox Interaction (Direct OpenSandbox)")
     print("=" * 60)
 
-    sandbox_cfg_file = Path(
-        os.getenv("A2S_SANDBOX_CFG_FILE", "config/sandbox-server-cfg.yaml")
-    )
+    sandbox_cfg_file = Path("config/sandbox-server-cfg.yaml")
     sandbox_cfg = load_sandbox_server_config(cfg_file=sandbox_cfg_file)
 
     connection_config = ConnectionConfig(

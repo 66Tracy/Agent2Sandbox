@@ -27,7 +27,7 @@ Validate an end-to-end path where sandbox runtime accesses model capabilities on
 
 ### Steps
 1. Start local `LLM-Proxy` at host/port from `config/llmproxy-cfg.yaml`.
-2. Read proxy config from `config/llmproxy-cfg.yaml` and resolve `ENV:*` refs from system environment variables.
+2. Read proxy config from `config/llmproxy-cfg.yaml` (values are defined directly in YAML).
 3. Read sandbox server config from `config/sandbox-server-cfg.yaml`.
 4. Create sandbox and inject:
    - `ANTHROPIC_BASE_URL=http://127.0.0.1:18080`

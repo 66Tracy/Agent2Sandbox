@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -35,13 +34,9 @@ def _resolve_ref(value: Optional[str]) -> Optional[str]:
     if not text:
         return None
     if text.startswith("ENV:"):
-        env_key = text.split(":", 1)[1].strip()
-        if not env_key:
-            raise ValueError("ENV reference must include key name, got empty key")
-        resolved = os.environ.get(env_key)
-        if resolved is None:
-            raise ValueError(f"Cannot resolve environment variable: {env_key}")
-        return resolved
+        raise ValueError(
+            "Environment references (ENV:...) are disabled; set the value directly in YAML."
+        )
     return text
 
 

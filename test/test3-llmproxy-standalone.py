@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import threading
 import time
@@ -22,12 +21,7 @@ from typing import Any, Dict
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from llm_proxy import (
-    LLMProxyConfig,
-    LLMProxyServer,
-    LLMProxyServerConfig,
-    load_llmproxy_config,
-)
+from llm_proxy import LLMProxyServer, load_llmproxy_config
 
 
 def _http_get_json(url: str, timeout_seconds: int = 5) -> Dict[str, Any]:
@@ -40,7 +34,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run standalone LLM-Proxy for manual tests")
     parser.add_argument(
         "--cfg-file",
-        default=os.getenv("A2S_PROXY_CFG_FILE", "config/llmproxy-cfg.yaml"),
+        default="config/llmproxy-cfg.yaml",
         help="Path to llmproxy config yaml",
     )
     parser.add_argument(
@@ -56,6 +50,9 @@ def main() -> int:
     args = _parse_args()
     config = load_llmproxy_config(cfg_file=args.cfg_file)
     server = LLMProxyServer(config=config)
+    health_base_url = server.base_url
+    if config.server_config.host == "0.0.0.0":
+        health_base_url = f"http://127.0.0.1:{config.server_config.port}"
 
     print("=" * 72)
     print("Test 3: Standalone LLM-Proxy")
@@ -65,11 +62,13 @@ def main() -> int:
     print(f"Trajectory dir: {config.server_config.log_dir}")
     print(f"Routes loaded: {len(config.routing_config.routes)}")
     print("Press Ctrl+C to stop.")
+    if health_base_url != server.base_url:
+        print(f"Health check: {health_base_url} (loopback)")
 
     with server.running():
         try:
-            health = _http_get_json(f"{server.base_url}/healthz")
-            routes = _http_get_json(f"{server.base_url}/routes")
+            health = _http_get_json(f"{health_base_url}/healthz")
+            routes = _http_get_json(f"{health_base_url}/routes")
             print(f"\nHealth: {health}")
             print("Routes:")
             for route in routes.get("routes", []):

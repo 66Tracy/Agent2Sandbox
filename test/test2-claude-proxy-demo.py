@@ -1,105 +1,94 @@
 """
-Test 2: Claude-Code Through Local LLM Proxy
+Test 2: Claude-Code Through External LLM Proxy
 
 Run with:
     python test/test2-claude-proxy-demo.py
+
+Note:
+    This script assumes the LLM-Proxy is already running.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
-from uuid import uuid4
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from llm_proxy import (
-    LLMProxyConfig,
-    LLMProxyServer,
-    LLMProxyServerConfig,
-    load_llmproxy_config,
-)
+from llm_proxy import load_llmproxy_config
 from sandbox_interactions import SandboxTaskRunner
 from task_definition import load_task_definition
 
 
-EXPECTED_TOKEN = os.getenv("A2S_EXPECTED_TOKEN", "A2S_OK_20260211")
+EXPECTED_TOKEN = "A2S_OK_20260211"
+
+
+def _safe_file_token(token: str) -> str:
+    return "".join(ch for ch in token if ch.isalnum() or ch in {"-", "_"})[:64] or "anonymous"
 
 
 async def main() -> int:
     print("=" * 72)
-    print("Test 2: Claude-Code Through Local LLM Proxy")
+    print("Test 2: Claude-Code Through External LLM Proxy")
     print("=" * 72)
 
-    task_file = Path(os.getenv("A2S_TASK_FILE", "tasks/claude_proxy_demo.yaml"))
-    proxy_cfg_file = Path(os.getenv("A2S_PROXY_CFG_FILE", "config/llmproxy-cfg.yaml"))
-    sandbox_cfg_file = Path(
-        os.getenv("A2S_SANDBOX_CFG_FILE", "config/sandbox-server-cfg.yaml")
-    )
-    proxy_host = os.getenv("A2S_PROXY_HOST")
-    proxy_port_raw = os.getenv("A2S_PROXY_PORT")
-    proxy_port = int(proxy_port_raw) if proxy_port_raw else None
-    trajectory_dir_raw = os.getenv("A2S_TRAJECTORY_DIR")
-    trajectory_dir = Path(trajectory_dir_raw) if trajectory_dir_raw else None
+    task_file = Path("tasks/claude_proxy_demo.yaml")
+    sandbox_cfg_file = Path("config/sandbox-server-cfg.yaml")
+    proxy_cfg_file = Path("config/llmproxy-cfg.yaml")
 
     print(f"Task file: {task_file}")
-    print(f"Proxy cfg: {proxy_cfg_file}")
     print(f"Sandbox cfg: {sandbox_cfg_file}")
-    proxy_host_display = proxy_host or "<from config>"
-    proxy_port_display = proxy_port or "<from config>"
-    print(f"Proxy listen: {proxy_host_display}:{proxy_port_display}")
-    print(f"Trajectory dir: {trajectory_dir or '<from config>'}")
+    print(f"Proxy cfg: {proxy_cfg_file}")
 
     task = load_task_definition(task_file)
     proxy_cfg = load_llmproxy_config(cfg_file=proxy_cfg_file)
-    server_cfg = LLMProxyServerConfig(
-        host=proxy_host or proxy_cfg.server_config.host,
-        port=proxy_port or proxy_cfg.server_config.port,
-        log_dir=trajectory_dir or proxy_cfg.server_config.log_dir,
-    )
-    proxy_config = LLMProxyConfig(
-        routing_config=proxy_cfg.routing_config,
-        server_config=server_cfg,
-    )
+    if task.llm.provider.strip().lower() != "anthropic":
+        print("This test expects task.llm.provider=anthropic for claude-code.")
+        return 1
 
-    session_token = f"a2s_{uuid4().hex}"
-    proxy_base_url = (task.llm.proxy_url or "").strip() or server_cfg.base_url
+    proxy_base_url = (task.llm.proxy_url or "").strip()
+    if not proxy_base_url:
+        print("Task config is missing llm.proxy_url.")
+        return 1
+
+    auth_token = (task.llm.api_key_ref or "").strip()
+    if not auth_token:
+        print("Task config is missing llm.api_key_ref.")
+        return 1
+    if auth_token.startswith("ENV:"):
+        print("ENV: references are disabled; set llm.api_key_ref directly in YAML.")
+        return 1
+
+    trajectory_dir = proxy_cfg.server_config.log_dir
+
+    print(f"Proxy url: {proxy_base_url}")
+    print(f"Trajectory dir: {trajectory_dir}")
+
     runtime_env = dict(task.env)
     runtime_env.update(
         {
             "ANTHROPIC_BASE_URL": proxy_base_url,
-            "ANTHROPIC_AUTH_TOKEN": session_token,
+            "ANTHROPIC_AUTH_TOKEN": auth_token,
             "ANTHROPIC_MODEL": task.llm.model,
             "IS_SANDBOX": "1",
         }
     )
 
     runner = SandboxTaskRunner(sandbox_cfg_file=sandbox_cfg_file)
-    proxy_server = LLMProxyServer(config=proxy_config)
 
     result = None
     try:
-        with proxy_server.running():
-            result = await runner.run_task(task, env_override=runtime_env)
+        result = await runner.run_task(task, env_override=runtime_env)
     except Exception as exc:
         print(f"\nExecution failed: {type(exc).__name__}: {exc}")
         return 1
-    finally:
-        proxy_server.register_session(
-            token=session_token,
-            sandbox_id=result.sandbox_id if result else None,
-            task_name=task.name,
-        )
 
     print("\n[1] Execution summary")
     print(f"Task: {result.task_name}")
     print(f"Sandbox ID: {result.sandbox_id}")
-    print(f"Session token: {session_token}")
-    trajectory_path = proxy_server.trajectory_path(session_token)
-    print(f"Trajectory dir: {trajectory_path}")
+    print(f"Session token: {auth_token}")
     print(f"Command error: {result.error or 'None'}")
 
     print("\n[2] Command stdout")
@@ -112,21 +101,28 @@ async def main() -> int:
     artifact_content = result.artifacts.get("/tmp/claude_result.txt", "")
     print(artifact_content or "<artifact missing>")
 
-    req_files = list(trajectory_path.glob("*-req.json"))
-    res_files = list(trajectory_path.glob("*-assistant.json"))
-
     checks = [
         ("Command exited without runtime error", result.error is None),
         (
             "Expected token appears in output or artifact",
             EXPECTED_TOKEN in result.stdout or EXPECTED_TOKEN in artifact_content,
         ),
-        ("Trajectory dir exists", trajectory_path.exists()),
-        ("Trajectory has req file", bool(req_files)),
-        ("Trajectory has assistant file", bool(res_files)),
     ]
 
-    print("\n[5] Verification")
+    trajectory_path = trajectory_dir / _safe_file_token(auth_token)
+    req_files = list(trajectory_path.glob("*-req.json"))
+    res_files = list(trajectory_path.glob("*-assistant.json"))
+    print("\n[5] Trajectory check")
+    print(f"Trajectory dir: {trajectory_path}")
+    checks.extend(
+        [
+            ("Trajectory dir exists", trajectory_path.exists()),
+            ("Trajectory has req file", bool(req_files)),
+            ("Trajectory has assistant file", bool(res_files)),
+        ]
+    )
+
+    print("\n[6] Verification")
     passed = 0
     for name, ok in checks:
         mark = "PASS" if ok else "FAIL"

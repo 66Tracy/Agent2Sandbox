@@ -43,7 +43,7 @@ routes:
       provider: openai
       base_url: https://api.deepseek.com
       upstream_model_name: deepseek-reasoner
-      api_key_ref: ENV:DEEPSEEK_API_KEY
+      api_key_ref: REPLACE_WITH_API_KEY
       timeout_seconds: 120
       # verify_ssl: true
 
@@ -52,7 +52,7 @@ routes:
       provider: anthropic
       base_url: https://api.deepseek.com/anthropic
       upstream_model_name: deepseek-reasoner
-      api_key_ref: ENV:DEEPSEEK_API_KEY
+      api_key_ref: REPLACE_WITH_API_KEY
       timeout_seconds: 120
       # verify_ssl: true
 ```

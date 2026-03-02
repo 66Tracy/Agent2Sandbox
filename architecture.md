@@ -53,7 +53,7 @@ llm:
   provider: anthropic  # openai 或 anthropic，需与下游协议一致
   proxy_url: http://llm-proxy:8000
   model: deepseek-anthropic
-  api_key_ref: ENV:LLM_PROXY_API_KEY
+  api_key_ref: REPLACE_WITH_API_KEY
 mcp:
   remote: []
   local: []
