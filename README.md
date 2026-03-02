@@ -83,20 +83,27 @@ claude
 ```
 
 ## Demo 复现（test/test2-claude-proxy-demo.py）
-需要先正确启动sandbox server，测试连通性后，再进行次测试。此测试会自动启动 LLM-Proxy，并在 sandbox 内运行 claude-code。  
-关键点：sandbox 内访问宿主机需使用 `host.docker.internal`，且 proxy 必须绑定 `0.0.0.0`（通过 `server.host` 或 `A2S_PROXY_HOST` 覆盖）。
+需要先正确启动 sandbox server，测试连通性后，再进行次测试。此测试不会启动 LLM-Proxy，只会使用 task 配置向已启动的代理发送请求，并在 sandbox 内运行 claude-code。  
+关键点：sandbox 内访问宿主机需使用 `host.docker.internal`，且 proxy 必须绑定 `0.0.0.0`（在 `config/llmproxy-cfg.yaml` 中设置）。
 
-1. 确认 `tasks/claude_proxy_demo.yaml`：
-   - `llm.proxy_url: http://host.docker.internal:18080`
-2. 运行测试（让代理绑定在 `0.0.0.0`）：
+1. 启动 LLM-Proxy：
 ```bash
 cd /Users/chenxi/Desktop/WorkPlace/agent2env/Agent2Sandbox
-A2S_PROXY_HOST=0.0.0.0 uv run test/test2-claude-proxy-demo.py
+uv run test/test3-llmproxy-standalone.py \
+  --cfg-file config/llmproxy-cfg.yaml
 ```
-3. 期望输出要点：
+2. 确认 `tasks/claude_proxy_demo.yaml`：
+   - `llm.proxy_url: http://host.docker.internal:18080`
+   - `llm.api_key_ref` 直接填写 token（不使用 `ENV:`）
+3. 运行测试：
+```bash
+cd /Users/chenxi/Desktop/WorkPlace/agent2env/Agent2Sandbox
+uv run test/test2-claude-proxy-demo.py
+```
+4. 期望输出要点：
    - `Result: 5/5 checks passed`
    - `A2S_OK_20260211` 出现在 stdout 或 `/tmp/claude_result.txt`
-   - 轨迹目录存在：`logs/trajectory/<session>/`，包含 `*-req.json` 与 `*-assistant.json`
+   - 轨迹目录存在：`logs/trajectory/<token>/`，包含 `*-req.json` 与 `*-assistant.json`
 
 ## Qwen-Agent 使用（OpenAI）
 Qwen-Agent 会调用 OpenAI ChatCompletions，`model_server` 需要指向代理地址：
